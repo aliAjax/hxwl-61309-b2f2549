@@ -1,6 +1,36 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Upload, FileSpreadsheet, Users, Check, Download, Bell, Phone, MessageSquare, Send, Clock, ChevronLeft, ChevronRight, GripVertical, AlertCircle, Stethoscope, Square, SquareCheckBig, FileX } from 'lucide-react';
+import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Upload, FileSpreadsheet, Users, Check, Download, Bell, Phone, MessageSquare, Send, Clock, ChevronLeft, ChevronRight, GripVertical, AlertCircle, Stethoscope, Square, SquareCheckBig, FileX, AlertOctagon, ShieldAlert, FileWarning, UserCircle, Flag, Filter, Edit3 } from 'lucide-react';
 import './App.css';
+
+const DEVIATION_STORAGE = 'hxwl-61309-deviation-records';
+
+const DEVIATION_TYPES = [
+  '访视超窗',
+  '检查项目遗漏',
+  '用药剂量偏差',
+  '未按方案用药',
+  '标本采集/处理错误',
+  'ICF签署问题',
+  '入组/排除标准不符合',
+  '伴随用药违规',
+  '不良事件漏报',
+  '其他'
+];
+
+const DEVIATION_SEVERITIES = [
+  '轻度',
+  '中度',
+  '重度',
+  '严重'
+];
+
+const DEVIATION_STATUSES = [
+  '待处理',
+  '调查中',
+  '已关闭'
+];
+
+const DEVIATION_STATUS_NOT_CLOSED = ['待处理', '调查中'];
 
 const appConfig = {
   "id": "hxwl-61309",
@@ -212,6 +242,93 @@ function loadNotifications() {
 
 function saveNotifications(records) {
   localStorage.setItem(appConfig.notifyStorage, JSON.stringify(records));
+}
+
+function loadDeviations() {
+  const raw = localStorage.getItem(DEVIATION_STORAGE);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      console.warn('加载偏差记录失败:', e);
+      return [];
+    }
+  }
+  return [];
+}
+
+function saveDeviations(records) {
+  localStorage.setItem(DEVIATION_STORAGE, JSON.stringify(records));
+}
+
+function severityClass(severity) {
+  const map = {
+    '轻度': 'dev-sev-mild',
+    '中度': 'dev-sev-moderate',
+    '重度': 'dev-sev-severe',
+    '严重': 'dev-sev-critical'
+  };
+  return map[severity] || 'dev-sev-mild';
+}
+
+function statusClassDev(status) {
+  const map = {
+    '待处理': 'dev-status-pending',
+    '调查中': 'dev-status-investigating',
+    '已关闭': 'dev-status-closed'
+  };
+  return map[status] || 'dev-status-pending';
+}
+
+function hasDuplicateDeviation(deviations, visitRecordId, deviationType, excludeId = null) {
+  return deviations.some(d => {
+    if (excludeId && d.id === excludeId) return false;
+    return d.visitRecordId === visitRecordId &&
+           d.deviationType === deviationType &&
+           DEVIATION_STATUS_NOT_CLOSED.includes(d.status);
+  });
+}
+
+function createDeviationFromVisit(record, extra = {}) {
+  const plannedDate = record.plannedDate || record.scheduledDate || '';
+  const windowDays = Number(record.windowDays) || 0;
+  let deviationDays = 0;
+  if (plannedDate) {
+    const actual = parseSafeDate(today);
+    const planned = parseSafeDate(plannedDate);
+    if (actual && planned) {
+      deviationDays = Math.round((actual - planned) / (1000 * 60 * 60 * 24));
+    }
+  }
+  const direction = deviationDays > 0 ? '超窗' : (deviationDays < 0 ? '提前' : '偏离');
+  const description = extra.description || `访视${direction}${Math.abs(deviationDays)}天（计划${plannedDate || '未知'}，当前${today}）`;
+
+  return {
+    id: uid(),
+    subjectNo: record.subjectNo || '',
+    group: record.group || '',
+    visitName: record.visitName || '',
+    visitRecordId: record.id,
+    enrollDate: record.enrollDate || '',
+    deviationType: extra.deviationType || '访视超窗',
+    occurrenceDate: extra.occurrenceDate || today,
+    severity: extra.severity || (Math.abs(deviationDays) > 7 ? '中度' : '轻度'),
+    description,
+    rootCause: extra.rootCause || '',
+    correctiveAction: extra.correctiveAction || '',
+    responsiblePerson: extra.responsiblePerson || '',
+    status: '待处理',
+    source: extra.source || '自动生成（超窗检测）',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    timeline: [{
+      status: '待处理',
+      at: today,
+      by: extra.source || '系统自动生成',
+      note: description
+    }],
+    deviationDays: Math.abs(deviationDays)
+  };
 }
 
 function addDays(dateStr, days) {
@@ -557,6 +674,33 @@ function App() {
   const [executionForm, setExecutionForm] = useState(null);
   const [executionTab, setExecutionTab] = useState('items');
 
+  const [deviations, setDeviations] = useState(loadDeviations);
+  const [devFormOpen, setDevFormOpen] = useState(false);
+  const [devFormMode, setDevFormMode] = useState('create');
+  const [devFormEditId, setDevFormEditId] = useState(null);
+  const [devForm, setDevForm] = useState({
+    subjectNo: '',
+    group: '',
+    visitName: '',
+    visitRecordId: '',
+    deviationType: '访视超窗',
+    occurrenceDate: today,
+    severity: '轻度',
+    description: '',
+    rootCause: '',
+    correctiveAction: '',
+    responsiblePerson: '',
+    status: '待处理'
+  });
+  const [devSelected, setDevSelected] = useState(null);
+  const [devFilters, setDevFilters] = useState({
+    query: '',
+    subjectNo: '全部',
+    severity: '全部',
+    type: '全部'
+  });
+  const [devBatchResult, setDevBatchResult] = useState({ show: false, count: 0, skipped: 0 });
+
   function persist(next) {
     try {
       const migrated = migrateRecords(next);
@@ -572,6 +716,252 @@ function App() {
   function persistTemplates(next) {
     setTemplates(next);
     saveTemplates(next);
+  }
+
+  function persistDeviations(next) {
+    setDeviations(next);
+    saveDeviations(next);
+  }
+
+  function resetDevForm() {
+    setDevForm({
+      subjectNo: '',
+      group: '',
+      visitName: '',
+      visitRecordId: '',
+      deviationType: '访视超窗',
+      occurrenceDate: today,
+      severity: '轻度',
+      description: '',
+      rootCause: '',
+      correctiveAction: '',
+      responsiblePerson: '',
+      status: '待处理'
+    });
+    setDevFormEditId(null);
+    setDevFormMode('create');
+  }
+
+  function openCreateDeviation(prefill = null) {
+    resetDevForm();
+    if (prefill) {
+      const record = prefill.visitRecord || null;
+      setDevForm({
+        subjectNo: prefill.subjectNo || (record?.subjectNo || ''),
+        group: prefill.group || (record?.group || ''),
+        visitName: prefill.visitName || (record?.visitName || ''),
+        visitRecordId: prefill.visitRecordId || (record?.id || ''),
+        deviationType: prefill.deviationType || '访视超窗',
+        occurrenceDate: prefill.occurrenceDate || today,
+        severity: prefill.severity || '轻度',
+        description: prefill.description || '',
+        rootCause: '',
+        correctiveAction: '',
+        responsiblePerson: '',
+        status: '待处理'
+      });
+    }
+    setDevFormOpen(true);
+  }
+
+  function openEditDeviation(dev) {
+    setDevFormMode('edit');
+    setDevFormEditId(dev.id);
+    setDevForm({
+      subjectNo: dev.subjectNo || '',
+      group: dev.group || '',
+      visitName: dev.visitName || '',
+      visitRecordId: dev.visitRecordId || '',
+      deviationType: dev.deviationType || '访视超窗',
+      occurrenceDate: dev.occurrenceDate || today,
+      severity: dev.severity || '轻度',
+      description: dev.description || '',
+      rootCause: dev.rootCause || '',
+      correctiveAction: dev.correctiveAction || '',
+      responsiblePerson: dev.responsiblePerson || '',
+      status: dev.status || '待处理'
+    });
+    setDevFormOpen(true);
+  }
+
+  function closeDevForm() {
+    setDevFormOpen(false);
+    resetDevForm();
+  }
+
+  function saveDeviationForm(e) {
+    e.preventDefault();
+    const { visitRecordId, deviationType, description, occurrenceDate, severity } = devForm;
+
+    if (!visitRecordId) {
+      alert('请关联具体的访视记录');
+      return;
+    }
+    if (!deviationType) {
+      alert('请选择偏差类型');
+      return;
+    }
+    if (!description || !description.trim()) {
+      alert('请填写偏差描述');
+      return;
+    }
+    if (!occurrenceDate) {
+      alert('请选择发生日期');
+      return;
+    }
+
+    if (devFormMode === 'create') {
+      if (hasDuplicateDeviation(deviations, visitRecordId, deviationType)) {
+        alert(`该访视已存在未关闭的「${deviationType}」偏差，无法重复创建。\n请先关闭现有偏差后再新建，或编辑现有偏差。`);
+        return;
+      }
+
+      const record = records.find(r => r.id === visitRecordId);
+      const newDev = {
+        id: uid(),
+        subjectNo: devForm.subjectNo || (record?.subjectNo || ''),
+        group: devForm.group || (record?.group || ''),
+        visitName: devForm.visitName || (record?.visitName || ''),
+        visitRecordId,
+        enrollDate: record?.enrollDate || '',
+        deviationType,
+        occurrenceDate,
+        severity: devForm.severity,
+        description: devForm.description.trim(),
+        rootCause: devForm.rootCause || '',
+        correctiveAction: devForm.correctiveAction || '',
+        responsiblePerson: devForm.responsiblePerson || '',
+        status: devForm.status,
+        source: '人工登记',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        timeline: [{
+          status: devForm.status,
+          at: today,
+          by: '人工登记',
+          note: `创建偏差：${deviationType}`
+        }],
+        deviationDays: 0
+      };
+      persistDeviations([newDev, ...deviations]);
+    } else {
+      const existing = deviations.find(d => d.id === devFormEditId);
+      if (!existing) return;
+
+      if (existing.status !== '已关闭' && DEVIATION_STATUS_NOT_CLOSED.includes(devForm.status)) {
+        if (hasDuplicateDeviation(deviations, visitRecordId, deviationType, devFormEditId)) {
+          alert(`该访视已存在另一条未关闭的「${deviationType}」偏差，无法修改。`);
+          return;
+        }
+      }
+
+      const nextTimeline = [...(existing.timeline || [])];
+      if (existing.status !== devForm.status) {
+        nextTimeline.push({
+          status: devForm.status,
+          at: today,
+          by: '操作员',
+          note: `状态由「${existing.status}」变更为「${devForm.status}」`
+        });
+      } else {
+        nextTimeline.push({
+          status: devForm.status,
+          at: today,
+          by: '操作员',
+          note: '更新偏差信息'
+        });
+      }
+
+      const updated = {
+        ...existing,
+        deviationType,
+        occurrenceDate,
+        severity: devForm.severity,
+        description: devForm.description.trim(),
+        rootCause: devForm.rootCause || '',
+        correctiveAction: devForm.correctiveAction || '',
+        responsiblePerson: devForm.responsiblePerson || '',
+        status: devForm.status,
+        updatedAt: new Date().toISOString(),
+        timeline: nextTimeline
+      };
+      persistDeviations(deviations.map(d => d.id === devFormEditId ? updated : d));
+      if (devSelected?.id === devFormEditId) {
+        setDevSelected(updated);
+      }
+    }
+    closeDevForm();
+  }
+
+  function updateDeviationStatus(devId, newStatus) {
+    const existing = deviations.find(d => d.id === devId);
+    if (!existing) return;
+    const nextTimeline = [...(existing.timeline || [])];
+    if (existing.status !== newStatus) {
+      nextTimeline.push({
+        status: newStatus,
+        at: today,
+        by: '操作员',
+        note: `状态由「${existing.status}」变更为「${newStatus}」`
+      });
+    }
+    const updated = {
+      ...existing,
+      status: newStatus,
+      updatedAt: new Date().toISOString(),
+      timeline: nextTimeline
+    };
+    persistDeviations(deviations.map(d => d.id === devId ? updated : d));
+    if (devSelected?.id === devId) {
+      setDevSelected(updated);
+    }
+  }
+
+  function deleteDeviation(devId) {
+    if (!confirm('确认删除该偏差记录？此操作不可撤销。')) return;
+    persistDeviations(deviations.filter(d => d.id !== devId));
+    if (devSelected?.id === devId) {
+      setDevSelected(null);
+    }
+  }
+
+  function autoCreateDeviationsFromOverdue() {
+    const overdueVisits = records.filter(r => r.status === '已超窗');
+    let created = 0;
+    let skipped = 0;
+    const nextDeviations = [...deviations];
+
+    for (const visit of overdueVisits) {
+      if (hasDuplicateDeviation(nextDeviations, visit.id, '访视超窗')) {
+        skipped++;
+        continue;
+      }
+      const newDev = createDeviationFromVisit(visit);
+      nextDeviations.unshift(newDev);
+      created++;
+    }
+
+    if (created > 0) {
+      persistDeviations(nextDeviations);
+    }
+    setDevBatchResult({ show: true, count: created, skipped });
+    setTimeout(() => setDevBatchResult({ show: false, count: 0, skipped: 0 }), 4000);
+  }
+
+  function getVisitOptionsForDeviation() {
+    return records
+      .slice()
+      .sort((a, b) => {
+        if (a.subjectNo !== b.subjectNo) return a.subjectNo.localeCompare(b.subjectNo);
+        return (a.plannedDays ?? 9999) - (b.plannedDays ?? 9999);
+      })
+      .map(r => ({
+        id: r.id,
+        subjectNo: r.subjectNo,
+        visitName: r.visitName,
+        group: r.group,
+        label: `${r.subjectNo} · ${r.visitName} · ${r.group} (${r.scheduledDate || r.plannedDate || '无日期'})`
+      }));
   }
 
   function addRecord(event) {
@@ -1339,7 +1729,7 @@ function App() {
         { status: '已完成', at: today, by: '访视执行完成' },
       ];
       if (outOfWindow) {
-        newTimelineEntries.push({ status: '偏差记录', at: today, by: `超窗${Math.abs(deviationDays)}天，自动生成偏差草稿` });
+        newTimelineEntries.push({ status: '偏差记录', at: today, by: `超窗${Math.abs(deviationDays)}天，已生成偏差档案` });
       }
       return {
         ...item,
@@ -1351,9 +1741,27 @@ function App() {
       };
     });
     persist(next);
+
+    if (outOfWindow) {
+      const visitForDeviation = next.find(r => r.id === executionSelected.id) || executionSelected;
+      if (!hasDuplicateDeviation(deviations, visitForDeviation.id, '访视超窗')) {
+        const direction = deviationDays > 0 ? '超窗' : '提前';
+        const newDev = createDeviationFromVisit(visitForDeviation, {
+          deviationType: '访视超窗',
+          occurrenceDate: actualDate,
+          severity: Math.abs(deviationDays) > 7 ? '中度' : '轻度',
+          description: `访视执行${direction}${Math.abs(deviationDays)}天（计划${visitForDeviation.plannedDate || visitForDeviation.scheduledDate}，实际${actualDate}）`,
+          source: '自动生成（访视执行超窗）'
+        });
+        newDev.occurrenceDate = actualDate;
+        newDev.deviationDays = Math.abs(deviationDays);
+        persistDeviations([newDev, ...deviations]);
+      }
+    }
+
     closeExecutionWorkbench();
     if (outOfWindow) {
-      alert(`访视已完成！注意：实际日期超出访视窗口 ${Math.abs(deviationDays)} 天，已自动创建偏差记录。`);
+      alert(`访视已完成！注意：实际日期超出访视窗口 ${Math.abs(deviationDays)} 天，已自动创建偏差档案，请在「方案偏差管理」页面查看并处理。`);
     } else {
       alert('访视已完成！');
     }
@@ -1620,6 +2028,40 @@ function App() {
     '即将进入窗口': reminderVisits.filter(v => v.category === '即将进入窗口').length,
   }), [reminderVisits]);
 
+  const filteredDeviations = useMemo(() => {
+    return deviations.filter(d => {
+      if (devFilters.query) {
+        const q = devFilters.query.toLowerCase();
+        const haystack = `${d.subjectNo}${d.visitName}${d.deviationType}${d.description}${d.responsiblePerson}`.toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      if (devFilters.subjectNo !== '全部' && d.subjectNo !== devFilters.subjectNo) return false;
+      if (devFilters.severity !== '全部' && d.severity !== devFilters.severity) return false;
+      if (devFilters.type !== '全部' && d.deviationType !== devFilters.type) return false;
+      return true;
+    });
+  }, [deviations, devFilters]);
+
+  const deviationsByStatus = useMemo(() => {
+    const groups = { '待处理': [], '调查中': [], '已关闭': [] };
+    for (const d of filteredDeviations) {
+      if (groups[d.status]) groups[d.status].push(d);
+    }
+    return groups;
+  }, [filteredDeviations]);
+
+  const deviationStats = useMemo(() => ({
+    total: deviations.length,
+    pending: deviations.filter(d => d.status === '待处理').length,
+    investigating: deviations.filter(d => d.status === '调查中').length,
+    closed: deviations.filter(d => d.status === '已关闭').length,
+    critical: deviations.filter(d => (d.severity === '重度' || d.severity === '严重') && DEVIATION_STATUS_NOT_CLOSED.includes(d.status)).length,
+  }), [deviations]);
+
+  const uniqueSubjectsForDevFilter = useMemo(() => {
+    return [...new Set(deviations.map(d => d.subjectNo).filter(Boolean))].sort();
+  }, [deviations]);
+
   return (
     <main className="shell" style={{ '--accent': appConfig.accent }}>
       <section className="hero">
@@ -1685,6 +2127,16 @@ function App() {
           onClick={() => setActiveTab('execution')}
         >
           <Stethoscope size={16} />访视执行
+        </button>
+        <button
+          type="button"
+          className={'tab-btn ' + (activeTab === 'deviation' ? 'active' : '')}
+          onClick={() => setActiveTab('deviation')}
+        >
+          <AlertOctagon size={16} />方案偏差管理
+          {deviationStats.pending + deviationStats.investigating > 0 && (
+            <span className="tab-badge">{deviationStats.pending + deviationStats.investigating}</span>
+          )}
         </button>
       </div>
 
@@ -2817,6 +3269,322 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
             )}
           </section>
         </section>
+      ) : activeTab === 'deviation' ? (
+        <section className="deviation-workspace">
+          <section className="panel deviation-stats-panel">
+            <div className="panel-title">
+              <AlertOctagon size={18} />
+              <h2>方案偏差概览</h2>
+            </div>
+            <div className="dev-stats">
+              <div className="dev-stat">
+                <FileWarning size={18} />
+                <div>
+                  <span>偏差总数</span>
+                  <strong>{deviationStats.total}</strong>
+                </div>
+              </div>
+              <div className="dev-stat pending">
+                <AlertTriangle size={18} />
+                <div>
+                  <span>待处理</span>
+                  <strong>{deviationStats.pending}</strong>
+                </div>
+              </div>
+              <div className="dev-stat investigating">
+                <Search size={18} />
+                <div>
+                  <span>调查中</span>
+                  <strong>{deviationStats.investigating}</strong>
+                </div>
+              </div>
+              <div className="dev-stat closed">
+                <CheckCircle2 size={18} />
+                <div>
+                  <span>已关闭</span>
+                  <strong>{deviationStats.closed}</strong>
+                </div>
+              </div>
+              <div className="dev-stat critical">
+                <ShieldAlert size={18} />
+                <div>
+                  <span>重度/严重未关</span>
+                  <strong>{deviationStats.critical}</strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="dev-toolbar">
+              <button
+                type="button"
+                className="primary"
+                style={{ marginTop: 0, width: 'auto', padding: '10px 16px' }}
+                onClick={() => openCreateDeviation()}
+              >
+                <Plus size={16} />人工登记偏差
+              </button>
+              <button
+                type="button"
+                className="secondary-btn"
+                style={{ marginTop: 0, width: 'auto', padding: '10px 16px', flex: '0 0 auto' }}
+                onClick={autoCreateDeviationsFromOverdue}
+              >
+                <AlertCircle size={16} />从超窗访视自动创建
+              </button>
+            </div>
+
+            {devBatchResult.show && (
+              <div className="dev-batch-result">
+                <Check size={14} />
+                自动创建完成：新增 <strong>{devBatchResult.count}</strong> 条，
+                跳过重复 <strong>{devBatchResult.skipped}</strong> 条
+              </div>
+            )}
+
+            <div className="dev-filters">
+              <div className="dev-filter-row">
+                <div className="dev-search">
+                  <Search size={14} />
+                  <input
+                    value={devFilters.query}
+                    onChange={e => setDevFilters({ ...devFilters, query: e.target.value })}
+                    placeholder="搜索编号/访视/类型/描述/责任人"
+                  />
+                </div>
+                <select
+                  value={devFilters.subjectNo}
+                  onChange={e => setDevFilters({ ...devFilters, subjectNo: e.target.value })}
+                >
+                  <option value="全部">全部受试者</option>
+                  {uniqueSubjectsForDevFilter.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <select
+                  value={devFilters.severity}
+                  onChange={e => setDevFilters({ ...devFilters, severity: e.target.value })}
+                >
+                  <option value="全部">全部严重程度</option>
+                  {DEVIATION_SEVERITIES.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <select
+                  value={devFilters.type}
+                  onChange={e => setDevFilters({ ...devFilters, type: e.target.value })}
+                >
+                  <option value="全部">全部偏差类型</option>
+                  {DEVIATION_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <button
+                  type="button"
+                  className="link-btn"
+                  onClick={() => setDevFilters({ query: '', subjectNo: '全部', severity: '全部', type: '全部' })}
+                >
+                  <RotateCcw size={14} />重置
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel deviation-kanban-panel">
+            <div className="panel-title">
+              <List size={18} />
+              <h2>偏差看板（{filteredDeviations.length}条）</h2>
+            </div>
+            <div className="dev-kanban">
+              {DEVIATION_STATUSES.map(statusName => (
+                <div key={statusName} className={'dev-kanban-col ' + statusClassDev(statusName)}>
+                  <div className="dev-kanban-col-head">
+                    <h3>{statusName}</h3>
+                    <span className="dev-col-count">{deviationsByStatus[statusName]?.length || 0}</span>
+                  </div>
+                  <div className="dev-kanban-list">
+                    {(deviationsByStatus[statusName] || []).length === 0 ? (
+                      <div className="dev-empty-slot">暂无记录</div>
+                    ) : (
+                      (deviationsByStatus[statusName] || []).map(dev => (
+                        <article
+                          key={dev.id}
+                          className={'dev-card ' + severityClass(dev.severity) + (devSelected?.id === dev.id ? ' selected' : '')}
+                          onClick={() => setDevSelected(dev)}
+                        >
+                          <div className="dev-card-head">
+                            <span className={'dev-severity ' + severityClass(dev.severity)}>
+                              {dev.severity}
+                            </span>
+                            <span className="dev-type-tag">{dev.deviationType}</span>
+                          </div>
+                          <div className="dev-card-title">
+                            <strong>{dev.subjectNo} · {dev.visitName}</strong>
+                            <span className="dev-group">{dev.group}</span>
+                          </div>
+                          <p className="dev-card-desc">{dev.description}</p>
+                          <div className="dev-card-meta">
+                            <span><CalendarDays size={12} />{dev.occurrenceDate}</span>
+                            {dev.responsiblePerson && (
+                              <span><UserCircle size={12} />{dev.responsiblePerson}</span>
+                            )}
+                          </div>
+                          {dev.source && (
+                            <div className="dev-card-source">
+                              <Flag size={10} />{dev.source}
+                            </div>
+                          )}
+                          <div className="dev-card-actions" onClick={e => e.stopPropagation()}>
+                            {statusName === '待处理' && (
+                              <button
+                                type="button"
+                                className="link-btn"
+                                onClick={() => updateDeviationStatus(dev.id, '调查中')}
+                              >
+                                <Search size={12} />开始调查
+                              </button>
+                            )}
+                            {statusName === '调查中' && (
+                              <button
+                                type="button"
+                                className="link-btn"
+                                onClick={() => updateDeviationStatus(dev.id, '已关闭')}
+                              >
+                                <CheckCircle2 size={12} />关闭
+                              </button>
+                            )}
+                            {statusName === '已关闭' && (
+                              <button
+                                type="button"
+                                className="link-btn"
+                                onClick={() => updateDeviationStatus(dev.id, '调查中')}
+                              >
+                                <RotateCcw size={12} />重新开启
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="link-btn"
+                              onClick={() => openEditDeviation(dev)}
+                            >
+                              <Edit3 size={12} />编辑
+                            </button>
+                            <button
+                              type="button"
+                              className="link-btn ghost-danger"
+                              onClick={() => deleteDeviation(dev.id)}
+                              style={{ color: '#dc2626' }}
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        </article>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="panel deviation-detail-panel">
+            <div className="panel-title">
+              <FileText size={18} />
+              <h2>偏差详情</h2>
+            </div>
+            {devSelected ? (
+              <div className="dev-detail">
+                <div className="dev-detail-head">
+                  <div>
+                    <h3 className="dev-detail-title">
+                      {devSelected.subjectNo} · {devSelected.visitName} · {devSelected.deviationType}
+                    </h3>
+                    <p className="dev-detail-sub">
+                      {devSelected.group} · 入组{devSelected.enrollDate || '-'} · 发生日期 {devSelected.occurrenceDate}
+                    </p>
+                  </div>
+                  <div className="dev-detail-status">
+                    <span className={'dev-status-tag ' + statusClassDev(devSelected.status)}>{devSelected.status}</span>
+                    <span className={'dev-severity ' + severityClass(devSelected.severity)}>{devSelected.severity}</span>
+                  </div>
+                </div>
+
+                <div className="dev-detail-grid">
+                  <div className="dev-detail-item">
+                    <label>偏差描述</label>
+                    <p>{devSelected.description}</p>
+                  </div>
+                  <div className="dev-detail-item">
+                    <label>根本原因</label>
+                    <p>{devSelected.rootCause || '未填写'}</p>
+                  </div>
+                  <div className="dev-detail-item">
+                    <label>纠正措施</label>
+                    <p>{devSelected.correctiveAction || '未填写'}</p>
+                  </div>
+                  <div className="dev-detail-item">
+                    <label>责任人</label>
+                    <p>{devSelected.responsiblePerson || '未分配'}</p>
+                  </div>
+                  {devSelected.source && (
+                    <div className="dev-detail-item">
+                      <label>来源</label>
+                      <p>{devSelected.source}</p>
+                    </div>
+                  )}
+                  {typeof devSelected.deviationDays === 'number' && devSelected.deviationDays > 0 && (
+                    <div className="dev-detail-item">
+                      <label>偏差天数</label>
+                      <p>{devSelected.deviationDays} 天</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="dev-detail-section">
+                  <h4><Clock size={14} />状态流转时间线</h4>
+                  <div className="execution-timeline">
+                    <div className="timeline-list">
+                      {(devSelected.timeline || []).map((step, idx) => (
+                        <div key={idx} className="timeline-item">
+                          <div className="timeline-dot" />
+                          <div className="timeline-content">
+                            <span className="timeline-status">{step.status}</span>
+                            <span className="timeline-time">{step.at}</span>
+                            <span className="timeline-by">{step.by}</span>
+                            {step.note && <span className="timeline-note">{step.note}</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="dev-detail-actions">
+                  {DEVIATION_STATUSES.map(st => (
+                    st !== devSelected.status && (
+                      <button
+                        key={st}
+                        type="button"
+                        className="secondary-btn"
+                        style={{ marginTop: 0, width: 'auto', padding: '8px 14px' }}
+                        onClick={() => updateDeviationStatus(devSelected.id, st)}
+                      >
+                        转为「{st}」
+                      </button>
+                    )
+                  ))}
+                  <button
+                    type="button"
+                    className="primary"
+                    style={{ marginTop: 0, width: 'auto', padding: '8px 16px' }}
+                    onClick={() => openEditDeviation(devSelected)}
+                  >
+                    <Edit3 size={14} />编辑偏差
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="execution-empty" style={{ padding: '40px 20px' }}>
+                <AlertOctagon size={48} />
+                <h3>选择一条偏差查看详情</h3>
+                <p>从看板中点击任意偏差卡片，可查看完整信息并进行状态流转。</p>
+              </div>
+            )}
+          </section>
+        </section>
       ) : (
         <section className="workspace">
           <section className="panel form-panel">
@@ -3060,6 +3828,151 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
           )}
         </aside>
       </section>
+
+      {devFormOpen && (
+        <div className="modal-overlay" onClick={closeDevForm}>
+          <div className="modal-box dev-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-title dev-modal-title">
+              <AlertOctagon size={20} />
+              <h3>{devFormMode === 'edit' ? '编辑偏差档案' : '登记方案偏差'}</h3>
+              <button type="button" className="link-btn" onClick={closeDevForm} style={{ marginLeft: 'auto' }}>
+                <X size={16} />关闭
+              </button>
+            </div>
+            <form onSubmit={saveDeviationForm}>
+              <div className="modal-body dev-modal-body">
+                <div className="form-grid">
+                  <label className="wide">
+                    <span>关联访视记录 <em style={{ color: '#dc2626' }}>*</em></span>
+                    <select
+                      value={devForm.visitRecordId}
+                      onChange={e => {
+                        const vid = e.target.value;
+                        const rec = records.find(r => r.id === vid);
+                        setDevForm({
+                          ...devForm,
+                          visitRecordId: vid,
+                          subjectNo: rec?.subjectNo || '',
+                          group: rec?.group || '',
+                          visitName: rec?.visitName || ''
+                        });
+                      }}
+                      required
+                    >
+                      <option value="">请选择访视记录...</option>
+                      {getVisitOptionsForDeviation().map(opt => (
+                        <option key={opt.id} value={opt.id}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {devForm.subjectNo && (
+                    <>
+                      <label>
+                        <span>受试者编号</span>
+                        <input type="text" value={devForm.subjectNo} readOnly style={{ background: '#f9fafb' }} />
+                      </label>
+                      <label>
+                        <span>访视名称</span>
+                        <input type="text" value={devForm.visitName} readOnly style={{ background: '#f9fafb' }} />
+                      </label>
+                    </>
+                  )}
+
+                  <label>
+                    <span>偏差类型 <em style={{ color: '#dc2626' }}>*</em></span>
+                    <select
+                      value={devForm.deviationType}
+                      onChange={e => setDevForm({ ...devForm, deviationType: e.target.value })}
+                      required
+                    >
+                      {DEVIATION_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>发生日期 <em style={{ color: '#dc2626' }}>*</em></span>
+                    <input
+                      type="date"
+                      value={devForm.occurrenceDate}
+                      onChange={e => setDevForm({ ...devForm, occurrenceDate: e.target.value })}
+                      required
+                    />
+                  </label>
+
+                  <label>
+                    <span>严重程度</span>
+                    <select
+                      value={devForm.severity}
+                      onChange={e => setDevForm({ ...devForm, severity: e.target.value })}
+                    >
+                      {DEVIATION_SEVERITIES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </label>
+
+                  <label>
+                    <span>处理状态</span>
+                    <select
+                      value={devForm.status}
+                      onChange={e => setDevForm({ ...devForm, status: e.target.value })}
+                    >
+                      {DEVIATION_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </label>
+
+                  <label className="wide">
+                    <span>偏差描述 <em style={{ color: '#dc2626' }}>*</em></span>
+                    <textarea
+                      value={devForm.description}
+                      onChange={e => setDevForm({ ...devForm, description: e.target.value })}
+                      placeholder="请详细描述偏差情况，包括发生经过、影响范围等..."
+                      rows={3}
+                      required
+                    />
+                  </label>
+
+                  <label className="wide">
+                    <span>根本原因分析</span>
+                    <textarea
+                      value={devForm.rootCause}
+                      onChange={e => setDevForm({ ...devForm, rootCause: e.target.value })}
+                      placeholder="分析偏差发生的根本原因..."
+                      rows={2}
+                    />
+                  </label>
+
+                  <label className="wide">
+                    <span>纠正与预防措施</span>
+                    <textarea
+                      value={devForm.correctiveAction}
+                      onChange={e => setDevForm({ ...devForm, correctiveAction: e.target.value })}
+                      placeholder="已采取或计划采取的纠正措施、预防措施..."
+                      rows={2}
+                    />
+                  </label>
+
+                  <label className="wide">
+                    <span>责任人</span>
+                    <input
+                      type="text"
+                      value={devForm.responsiblePerson}
+                      onChange={e => setDevForm({ ...devForm, responsiblePerson: e.target.value })}
+                      placeholder="负责处理该偏差的人员姓名或角色"
+                    />
+                  </label>
+                </div>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="modal-cancel-btn" onClick={closeDevForm}>取消</button>
+                <button
+                  type="submit" className="primary" style={{ marginTop: 0, width: 'auto', padding: '10px 24px' }}>
+                  <Save size={16} />{devFormMode === 'edit' ? '保存修改' : '提交登记'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
