@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Upload, FileSpreadsheet, Users, Check, Download, Bell, Phone, MessageSquare, Send, Clock } from 'lucide-react';
 import './App.css';
 
@@ -660,7 +660,9 @@ function App() {
   }
 
   function batchNotify() {
-    if (reminderSelected.size === 0) {
+    const visibleIds = new Set(filteredReminderVisits.map(v => v.id));
+    const validSelected = [...reminderSelected].filter(id => visibleIds.has(id));
+    if (validSelected.length === 0) {
       alert('请先选择需要通知的访视记录');
       return;
     }
@@ -670,7 +672,7 @@ function App() {
     }
     setNotifySimulating(true);
     setTimeout(() => {
-      const newNotifies = [...reminderSelected].map(recordId => ({
+      const newNotifies = validSelected.map(recordId => ({
         id: uid(),
         recordId,
         notifiedAt: new Date().toISOString(),
@@ -880,6 +882,15 @@ function App() {
       return true;
     });
   }, [reminderVisits, reminderGroupFilter, reminderCategoryFilter, reminderDateStart, reminderDateEnd]);
+
+  useEffect(() => {
+    if (reminderSelected.size === 0) return;
+    const visibleIds = new Set(filteredReminderVisits.map(v => v.id));
+    const next = new Set([...reminderSelected].filter(id => visibleIds.has(id)));
+    if (next.size !== reminderSelected.size) {
+      setReminderSelected(next);
+    }
+  }, [filteredReminderVisits]);
 
   const reminderStats = useMemo(() => ({
     '已超窗': reminderVisits.filter(v => v.category === '已超窗').length,
