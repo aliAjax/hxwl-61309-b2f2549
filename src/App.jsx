@@ -265,70 +265,147 @@ function toISODate(d) {
 }
 
 function computeWindowDates(record) {
-  const plannedDate = record.plannedDate || '';
+  if (!record || typeof record !== 'object') {
+    return { windowStart: null, windowEnd: null, targetDate: null, allDates: [] };
+  }
+  const effectiveDate = record.scheduledDate || record.plannedDate || '';
   const windowDays = Number(record.windowDays) || 0;
-  if (!plannedDate) return { windowStart: null, windowEnd: null, targetDate: null, allDates: [] };
-  const planned = parseSafeDate(plannedDate);
-  if (!planned) return { windowStart: null, windowEnd: null, targetDate: null, allDates: [] };
-  const ws = safeAddDays(plannedDate, -windowDays);
-  const we = safeAddDays(plannedDate, windowDays);
+  if (!effectiveDate || !parseSafeDate(effectiveDate)) {
+    return { windowStart: null, windowEnd: null, targetDate: null, allDates: [] };
+  }
+  const ws = safeAddDays(effectiveDate, -windowDays);
+  const we = safeAddDays(effectiveDate, windowDays);
   const allDates = [];
   if (ws && we) {
     const start = parseSafeDate(ws);
     const end = parseSafeDate(we);
     if (start && end) {
-      const current = new Date(start);
-      while (current <= end) {
-        allDates.push(toISODate(current));
-        current.setDate(current.getDate() + 1);
+      try {
+        const current = new Date(start);
+        const endTime = end.getTime();
+        let iterations = 0;
+        const maxIterations = 366;
+        while (current.getTime() <= endTime && iterations < maxIterations) {
+          allDates.push(toISODate(current));
+          current.setDate(current.getDate() + 1);
+          iterations++;
+        }
+      } catch (e) {
+        console.warn('计算窗口日期出错:', e);
       }
     }
   }
-  return { windowStart: ws, windowEnd: we, targetDate: plannedDate, allDates };
+  return { windowStart: ws, windowEnd: we, targetDate: effectiveDate, allDates };
 }
 
 function getCalendarMonthGrid(year, month) {
-  const firstDay = new Date(year, month, 1);
-  const startDow = firstDay.getDay();
-  const startOffset = startDow === 0 ? 6 : startDow - 1;
-  const gridStart = new Date(year, month, 1 - startOffset);
-  const cells = [];
-  for (let i = 0; i < 42; i++) {
-    const d = new Date(gridStart);
-    d.setDate(d.getDate() + i);
-    cells.push(d);
+  try {
+    const safeYear = Math.max(1900, Math.min(2100, Number(year) || new Date().getFullYear()));
+    const safeMonth = Math.max(0, Math.min(11, Number(month) || 0));
+    
+    const firstDay = new Date(safeYear, safeMonth, 1);
+    if (isNaN(firstDay.getTime())) {
+      const now = new Date();
+      return getCalendarMonthGrid(now.getFullYear(), now.getMonth());
+    }
+    
+    const startDow = firstDay.getDay();
+    const startOffset = startDow === 0 ? 6 : startDow - 1;
+    const gridStart = new Date(safeYear, safeMonth, 1 - startOffset);
+    const cells = [];
+    
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(gridStart);
+      d.setDate(gridStart.getDate() + i);
+      if (!isNaN(d.getTime())) {
+        cells.push(d);
+      }
+    }
+    
+    if (cells.length !== 42) {
+      console.warn('日历网格生成异常，返回默认值');
+      const now = new Date();
+      return getCalendarMonthGrid(now.getFullYear(), now.getMonth());
+    }
+    
+    return cells;
+  } catch (e) {
+    console.error('生成日历网格出错:', e);
+    const now = new Date();
+    return getCalendarMonthGrid(now.getFullYear(), now.getMonth());
   }
-  return cells;
 }
 
 function getWeekDays(baseDate) {
-  const d = parseSafeDate(baseDate) || new Date();
-  const dow = d.getDay();
-  const mondayOffset = dow === 0 ? -6 : 1 - dow;
-  const monday = new Date(d);
-  monday.setDate(d.getDate() + mondayOffset);
-  const days = [];
-  for (let i = 0; i < 7; i++) {
-    const dd = new Date(monday);
-    dd.setDate(monday.getDate() + i);
-    days.push(dd);
+  try {
+    const d = parseSafeDate(baseDate) || new Date();
+    if (isNaN(d.getTime())) {
+      return getWeekDays(toISODate(new Date()));
+    }
+    const dow = d.getDay();
+    const mondayOffset = dow === 0 ? -6 : 1 - dow;
+    const monday = new Date(d);
+    monday.setDate(d.getDate() + mondayOffset);
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const dd = new Date(monday);
+      dd.setDate(monday.getDate() + i);
+      if (!isNaN(dd.getTime())) {
+        days.push(dd);
+      }
+    }
+    if (days.length !== 7) {
+      console.warn('周历生成异常，返回默认值');
+      return getWeekDays(toISODate(new Date()));
+    }
+    return days;
+  } catch (e) {
+    console.error('生成周历出错:', e);
+    return getWeekDays(toISODate(new Date()));
   }
-  return days;
 }
 
-function computeVisitStatus(plannedDate, windowDays, actualStatus) {
-  if (actualStatus && actualStatus !== '待访视') return actualStatus;
-  if (!plannedDate) return '待访视';
-  const plan = new Date(plannedDate);
-  const now = new Date(today);
-  const window = Number(windowDays) || 0;
-  const start = new Date(plan);
-  start.setDate(start.getDate() - window);
-  const end = new Date(plan);
-  end.setDate(end.getDate() + window);
-  if (now > end) return '已超窗';
-  if (now >= start && now <= end) return '窗口内';
-  return '待访视';
+function computeVisitStatus(dateOrRecord, windowDays, actualStatus) {
+  try {
+    if (actualStatus && actualStatus !== '待访视') return actualStatus;
+    
+    let scheduledDate;
+    if (typeof dateOrRecord === 'object' && dateOrRecord !== null) {
+      scheduledDate = dateOrRecord.scheduledDate || dateOrRecord.plannedDate || '';
+    } else {
+      scheduledDate = dateOrRecord;
+    }
+    
+    if (!scheduledDate || !parseSafeDate(scheduledDate)) return '待访视';
+    
+    const plan = parseSafeDate(scheduledDate);
+    if (!plan) return '待访视';
+    
+    const now = parseSafeDate(today);
+    if (!now) return '待访视';
+    
+    const window = Number(windowDays) || 0;
+    if (!isFinite(window)) return '待访视';
+    
+    const start = new Date(plan);
+    start.setDate(start.getDate() - window);
+    if (isNaN(start.getTime())) return '待访视';
+    
+    const end = new Date(plan);
+    end.setDate(end.getDate() + window);
+    if (isNaN(end.getTime())) return '待访视';
+    
+    const nowTime = now.getTime();
+    const endTime = end.getTime();
+    const startTime = start.getTime();
+    
+    if (nowTime > endTime) return '已超窗';
+    if (nowTime >= startTime && nowTime <= endTime) return '窗口内';
+    return '待访视';
+  } catch (e) {
+    console.warn('计算访视状态出错:', e);
+    return actualStatus || '待访视';
+  }
 }
 
 function validateTemplate(template) {
@@ -374,8 +451,27 @@ function categoryClass(category) {
   return map[category] || 'cat-upcoming';
 }
 
+function migrateRecords(records) {
+  try {
+    return records.map(record => {
+      if (!record || typeof record !== 'object') return record;
+      const migrated = { ...record };
+      if (!migrated.scheduledDate && migrated.plannedDate) {
+        migrated.scheduledDate = migrated.plannedDate;
+      }
+      return migrated;
+    });
+  } catch (e) {
+    console.warn('数据迁移出错:', e);
+    return records;
+  }
+}
+
 function App() {
-  const [records, setRecords] = useState(loadRecords);
+  const [records, setRecords] = useState(() => {
+    const loaded = loadRecords();
+    return migrateRecords(loaded);
+  });
   const [form, setForm] = useState(appConfig.defaultValues);
   const [filters, setFilters] = useState({ query: '', status: '全部' });
   const [selected, setSelected] = useState(null);
@@ -417,8 +513,15 @@ function App() {
   const [reasonText, setReasonText] = useState('');
 
   function persist(next) {
-    setRecords(next);
-    localStorage.setItem(appConfig.storage, JSON.stringify(next));
+    try {
+      const migrated = migrateRecords(next);
+      setRecords(migrated);
+      localStorage.setItem(appConfig.storage, JSON.stringify(migrated));
+    } catch (e) {
+      console.error('保存数据出错:', e);
+      setRecords(next);
+      localStorage.setItem(appConfig.storage, JSON.stringify(next));
+    }
   }
 
   function persistTemplates(next) {
@@ -431,6 +534,7 @@ function App() {
     const nextRecord = {
       id: uid(),
       ...form,
+      scheduledDate: form.plannedDate || '',
       status: form.status || appConfig.primaryStatus,
       createdAt: new Date().toISOString(),
       timeline: [{ status: form.status || appConfig.primaryStatus, at: today, by: '录入' }]
@@ -460,13 +564,15 @@ function App() {
     }
     const newRecords = validVisits.map(v => {
       const plannedDate = addDays(form.enrollDate, v.plannedDays);
-      const initialStatus = computeVisitStatus(plannedDate, v.windowDays, null);
+      const scheduledDate = plannedDate;
+      const initialStatus = computeVisitStatus(scheduledDate, v.windowDays, null);
       return {
         id: uid(),
         subjectNo: form.subjectNo,
         group: form.group,
         enrollDate: form.enrollDate,
         plannedDate,
+        scheduledDate,
         visitName: v.visitName,
         plannedDays: Number(v.plannedDays),
         windowDays: String(v.windowDays ?? 0),
@@ -500,7 +606,13 @@ function App() {
   }
 
   function duplicateRecord(item) {
-    const copied = { ...item, id: uid(), status: appConfig.primaryStatus, timeline: [{ status: appConfig.primaryStatus, at: today, by: '复制' }] };
+    const copied = { 
+      ...item, 
+      id: uid(), 
+      scheduledDate: item.scheduledDate || item.plannedDate,
+      status: appConfig.primaryStatus, 
+      timeline: [{ status: appConfig.primaryStatus, at: today, by: '复制' }] 
+    };
     persist([copied, ...records]);
     setSelected(copied);
   }
@@ -860,13 +972,15 @@ function App() {
           
           for (const v of validVisits) {
             const plannedDate = addDays(row.enrollDate, v.plannedDays);
-            const initialStatus = computeVisitStatus(plannedDate, v.windowDays, null);
+            const scheduledDate = plannedDate;
+            const initialStatus = computeVisitStatus(scheduledDate, v.windowDays, null);
             newRecords.push({
               id: uid(),
               subjectNo: row.subjectNo,
               group: row.group,
               enrollDate: row.enrollDate,
               plannedDate,
+              scheduledDate,
               visitName: v.visitName,
               plannedDays: Number(v.plannedDays),
               windowDays: String(v.windowDays ?? 0),
@@ -957,14 +1071,15 @@ function App() {
         setDraggingRecord(null);
         return;
       }
-      if (dateStr === draggingRecord.plannedDate) {
+      const currentScheduled = draggingRecord.scheduledDate || draggingRecord.plannedDate || '';
+      if (dateStr === currentScheduled) {
         setDraggingRecord(null);
         return;
       }
       setReasonModal({
         open: true,
         recordId: draggingRecord.id,
-        oldDate: draggingRecord.plannedDate || '',
+        oldDate: currentScheduled,
         newDate: dateStr,
       });
       setReasonText('');
@@ -982,7 +1097,7 @@ function App() {
         alert('请填写调整原因');
         return;
       }
-      const { recordId, newDate } = reasonModal;
+      const { recordId, oldDate, newDate } = reasonModal;
       if (!recordId || !newDate || !parseSafeDate(newDate)) {
         setReasonModal({ open: false, recordId: null, oldDate: '', newDate: '' });
         setReasonText('');
@@ -1007,17 +1122,17 @@ function App() {
         if (item.id !== recordId) return item;
         const oldDeviation = item.deviation || '';
         const newDeviation = oldDeviation
-          ? `${oldDeviation}；预约日调整至${newDate}（${reason}）`
-          : `预约日调整至${newDate}（${reason}）`;
+          ? `${oldDeviation}；预约日由${oldDate}调整至${newDate}（${reason}）`
+          : `预约日由${oldDate}调整至${newDate}（${reason}）`;
         const oldTimeline = item.timeline || [];
         const newTimelineEntry = {
           status: newStatus,
           at: today,
-          by: `拖动调整→${newDate}，原因：${reason}`
+          by: `预约调整：${oldDate}→${newDate}，原因：${reason}`
         };
         return {
           ...item,
-          plannedDate: newDate,
+          scheduledDate: newDate,
           status: newStatus,
           deviation: newDeviation,
           timeline: [...oldTimeline, newTimelineEntry],
@@ -1088,7 +1203,7 @@ function App() {
 
   const groupedByDate = useMemo(() => {
     return filteredRecords.reduce((acc, item) => {
-      const key = item.plannedDate || item.enrollDate || '未排期';
+      const key = item.scheduledDate || item.plannedDate || item.enrollDate || '未排期';
       (acc[key] ||= []).push(item);
       return acc;
     }, {});
@@ -1105,23 +1220,34 @@ function App() {
   const reminderVisits = useMemo(() => {
     const in7Days = addDays(today, 7);
     return records
-      .filter(r => r.status !== '已完成' && r.plannedDate)
-      .map(r => {
-        const windowDays = Number(r.windowDays) || 0;
-        const windowStart = addDays(r.plannedDate, -windowDays);
-        const windowEnd = addDays(r.plannedDate, windowDays);
-        let category = '';
-        if (today > windowEnd) {
-          category = '已超窗';
-        } else if (today === windowEnd) {
-          category = '当天到期';
-        } else if (windowStart <= today && today < windowEnd) {
-          category = '窗口内';
-        } else if (windowStart > today && windowStart <= in7Days) {
-          category = '即将进入窗口';
-        }
-        return { ...r, windowStart, windowEnd, category };
+      .filter(r => {
+        if (!r || r.status === '已完成') return false;
+        const effectiveDate = r.scheduledDate || r.plannedDate;
+        return effectiveDate && parseSafeDate(effectiveDate);
       })
+      .map(r => {
+        try {
+          const windowDays = Number(r.windowDays) || 0;
+          const effectiveDate = r.scheduledDate || r.plannedDate;
+          const windowStart = safeAddDays(effectiveDate, -windowDays) || effectiveDate;
+          const windowEnd = safeAddDays(effectiveDate, windowDays) || effectiveDate;
+          let category = '';
+          if (today > windowEnd) {
+            category = '已超窗';
+          } else if (today === windowEnd) {
+            category = '当天到期';
+          } else if (windowStart <= today && today < windowEnd) {
+            category = '窗口内';
+          } else if (windowStart > today && windowStart <= in7Days) {
+            category = '即将进入窗口';
+          }
+          return { ...r, windowStart, windowEnd, category };
+        } catch (e) {
+          console.warn('计算提醒访视出错:', r, e);
+          return null;
+        }
+      })
+      .filter(Boolean)
       .filter(r => r.category)
       .sort((a, b) => {
         const order = { '已超窗': 0, '当天到期': 1, '窗口内': 2, '即将进入窗口': 3 };
@@ -1131,10 +1257,12 @@ function App() {
 
   const filteredReminderVisits = useMemo(() => {
     return reminderVisits.filter(v => {
+      if (!v) return false;
       if (reminderGroupFilter !== '全部' && v.group !== reminderGroupFilter) return false;
       if (reminderCategoryFilter !== '全部' && v.category !== reminderCategoryFilter) return false;
-      if (reminderDateStart && v.plannedDate < reminderDateStart) return false;
-      if (reminderDateEnd && v.plannedDate > reminderDateEnd) return false;
+      const effectiveDate = v.scheduledDate || v.plannedDate || '';
+      if (reminderDateStart && effectiveDate < reminderDateStart) return false;
+      if (reminderDateEnd && effectiveDate > reminderDateEnd) return false;
       return true;
     });
   }, [reminderVisits, reminderGroupFilter, reminderCategoryFilter, reminderDateStart, reminderDateEnd]);
@@ -1143,8 +1271,9 @@ function App() {
     return records
       .filter(r => {
         if (!r) return false;
-        if (!r.plannedDate) return false;
-        if (parseSafeDate(r.plannedDate) === null) return false;
+        const effectiveDate = r.scheduledDate || r.plannedDate;
+        if (!effectiveDate) return false;
+        if (parseSafeDate(effectiveDate) === null) return false;
         if (calSubjectFilter !== '全部' && r.subjectNo !== calSubjectFilter) return false;
         if (calGroupFilter !== '全部' && r.group !== calGroupFilter) return false;
         return true;
@@ -1155,7 +1284,8 @@ function App() {
           return { ...r, windowStart: w.windowStart, windowEnd: w.windowEnd, targetDate: w.targetDate, allWindowDates: w.allDates };
         } catch (e) {
           console.warn('计算访视窗口出错:', r, e);
-          return { ...r, windowStart: null, windowEnd: null, targetDate: r.plannedDate, allWindowDates: [r.plannedDate] };
+          const effectiveDate = r.scheduledDate || r.plannedDate;
+          return { ...r, windowStart: null, windowEnd: null, targetDate: effectiveDate, allWindowDates: [effectiveDate] };
         }
       })
       .filter(r => r.allWindowDates && r.allWindowDates.length > 0);
@@ -1352,7 +1482,7 @@ function App() {
                   <div className="record-head">
                     <div>
                       <h3>{`${item.subjectNo} ${item.visitName}`}</h3>
-                      <p>{`${item.group} · 入组${item.enrollDate}${item.plannedDate ? ` · 计划${item.plannedDate}（第${item.plannedDays ?? '?'}天）` : ''} · ±${item.windowDays}天`}</p>
+                      <p>{`${item.group} · 入组${item.enrollDate}${item.plannedDate ? ` · 计划${item.plannedDate}` : ''}${item.scheduledDate && item.scheduledDate !== item.plannedDate ? ` → 预约${item.scheduledDate}` : ''}${item.plannedDays !== undefined && item.plannedDays !== null ? `（第${item.plannedDays ?? '?'}天）` : ''} · ±${item.windowDays}天`}</p>
                     </div>
                     <span className={'status ' + statusClass(item.status)}>{item.status}</span>
                   </div>
@@ -1562,7 +1692,7 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
                       .map((item) => (
                         <span key={item.id} className={'visit-chip ' + statusClass(item.status)}>
                           <strong>{item.visitName}</strong>
-                          <span>D{item.plannedDays ?? '?'} · {item.plannedDate || '-'}</span>
+                          <span>D{item.plannedDays ?? '?'} · {item.scheduledDate || item.plannedDate || '-'}</span>
                           <em>{item.status}</em>
                         </span>
                       ))}
@@ -1749,7 +1879,7 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
                                 </label>
                                 <div className="reminder-card-title">
                                   <h3>{item.subjectNo} · {item.visitName}</h3>
-                                  <p>{item.group} · 计划 {item.plannedDate} · 窗口 {item.windowStart} ~ {item.windowEnd}</p>
+                                  <p>{item.group} · 计划 {item.plannedDate}{item.scheduledDate && item.scheduledDate !== item.plannedDate ? ` → 预约 ${item.scheduledDate}` : ''} · 窗口 {item.windowStart} ~ {item.windowEnd}</p>
                                 </div>
                                 <span className={'status ' + statusClass(item.status)}>{item.status}</span>
                               </div>
@@ -2294,7 +2424,7 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
           {selected ? (
             <div className="detail">
               <h3>{`${selected.subjectNo} ${selected.visitName}`}</h3>
-              <p>{`${selected.group} · 入组${selected.enrollDate}${selected.plannedDate ? ` · 计划访视${selected.plannedDate}` : ''} · ±${selected.windowDays}天`}</p>
+              <p>{`${selected.group} · 入组${selected.enrollDate}${selected.plannedDate ? ` · 计划访视${selected.plannedDate}` : ''}${selected.scheduledDate && selected.scheduledDate !== selected.plannedDate ? ` → 预约访视${selected.scheduledDate}` : ''} · ±${selected.windowDays}天`}</p>
               <p className="record-detail">{selected.items}</p>
               {selected.deviation && (
                 <div className="warning" style={{ display: 'block' }}>
