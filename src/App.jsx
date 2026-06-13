@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Upload, FileSpreadsheet, Users, Check, Download, Bell, Phone, MessageSquare, Send, Clock } from 'lucide-react';
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
+import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Upload, FileSpreadsheet, Users, Check, Download, Bell, Phone, MessageSquare, Send, Clock, ChevronLeft, ChevronRight, GripVertical, AlertCircle } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -221,6 +221,101 @@ function addDays(dateStr, days) {
   return d.toISOString().slice(0, 10);
 }
 
+function safeAddDays(dateStr, days) {
+  if (!dateStr) return null;
+  if (typeof dateStr !== 'string') return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
+  const d = new Date(dateStr + 'T00:00:00');
+  if (isNaN(d.getTime())) return null;
+  const y = d.getFullYear();
+  const m = d.getMonth();
+  const day = d.getDate();
+  if (y < 1900 || y > 2100) return null;
+  const n = Number(days);
+  if (!isFinite(n) || isNaN(n)) return null;
+  const safeDays = Math.max(-36500, Math.min(36500, Math.round(n)));
+  const result = new Date(y, m, day + safeDays);
+  if (isNaN(result.getTime())) return null;
+  const ry = result.getFullYear();
+  if (ry < 1900 || ry > 2100) return null;
+  return toISODate(result);
+}
+
+function parseSafeDate(dateStr) {
+  if (!dateStr) return null;
+  if (typeof dateStr !== 'string') return null;
+  let d;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    d = new Date(dateStr + 'T00:00:00');
+  } else {
+    d = new Date(dateStr);
+  }
+  if (isNaN(d.getTime())) return null;
+  const y = d.getFullYear();
+  if (y < 1900 || y > 2100) return null;
+  return d;
+}
+
+function toISODate(d) {
+  if (!d || isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function computeWindowDates(record) {
+  const plannedDate = record.plannedDate || '';
+  const windowDays = Number(record.windowDays) || 0;
+  if (!plannedDate) return { windowStart: null, windowEnd: null, targetDate: null, allDates: [] };
+  const planned = parseSafeDate(plannedDate);
+  if (!planned) return { windowStart: null, windowEnd: null, targetDate: null, allDates: [] };
+  const ws = safeAddDays(plannedDate, -windowDays);
+  const we = safeAddDays(plannedDate, windowDays);
+  const allDates = [];
+  if (ws && we) {
+    const start = parseSafeDate(ws);
+    const end = parseSafeDate(we);
+    if (start && end) {
+      const current = new Date(start);
+      while (current <= end) {
+        allDates.push(toISODate(current));
+        current.setDate(current.getDate() + 1);
+      }
+    }
+  }
+  return { windowStart: ws, windowEnd: we, targetDate: plannedDate, allDates };
+}
+
+function getCalendarMonthGrid(year, month) {
+  const firstDay = new Date(year, month, 1);
+  const startDow = firstDay.getDay();
+  const startOffset = startDow === 0 ? 6 : startDow - 1;
+  const gridStart = new Date(year, month, 1 - startOffset);
+  const cells = [];
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(gridStart);
+    d.setDate(d.getDate() + i);
+    cells.push(d);
+  }
+  return cells;
+}
+
+function getWeekDays(baseDate) {
+  const d = parseSafeDate(baseDate) || new Date();
+  const dow = d.getDay();
+  const mondayOffset = dow === 0 ? -6 : 1 - dow;
+  const monday = new Date(d);
+  monday.setDate(d.getDate() + mondayOffset);
+  const days = [];
+  for (let i = 0; i < 7; i++) {
+    const dd = new Date(monday);
+    dd.setDate(monday.getDate() + i);
+    days.push(dd);
+  }
+  return days;
+}
+
 function computeVisitStatus(plannedDate, windowDays, actualStatus) {
   if (actualStatus && actualStatus !== '待访视') return actualStatus;
   if (!plannedDate) return '待访视';
@@ -311,6 +406,15 @@ function App() {
   const [notifyOperator, setNotifyOperator] = useState('');
   const [notifySimulating, setNotifySimulating] = useState(false);
   const [notifySuccess, setNotifySuccess] = useState(false);
+
+  const [calView, setCalView] = useState('month');
+  const [calBaseDate, setCalBaseDate] = useState(toISODate(new Date()));
+  const [calSubjectFilter, setCalSubjectFilter] = useState('全部');
+  const [calGroupFilter, setCalGroupFilter] = useState('全部');
+  const [draggingRecord, setDraggingRecord] = useState(null);
+  const [dragOverDate, setDragOverDate] = useState(null);
+  const [reasonModal, setReasonModal] = useState({ open: false, recordId: null, oldDate: '', newDate: '' });
+  const [reasonText, setReasonText] = useState('');
 
   function persist(next) {
     setRecords(next);
@@ -787,6 +891,158 @@ function App() {
     }, 300);
   }
 
+  function calNavigate(direction) {
+    const d = parseSafeDate(calBaseDate) || new Date();
+    if (calView === 'month') {
+      d.setMonth(d.getMonth() + direction);
+    } else {
+      d.setDate(d.getDate() + direction * 7);
+    }
+    setCalBaseDate(toISODate(d));
+  }
+
+  function calGoToday() {
+    setCalBaseDate(toISODate(new Date()));
+  }
+
+  function handleCalDragStart(e, record) {
+    try {
+      if (!record || !record.id) {
+        e.preventDefault();
+        return;
+      }
+      if (record.status === '已完成') {
+        e.preventDefault();
+        return;
+      }
+      setDraggingRecord(record);
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', record.id);
+    } catch (err) {
+      console.warn('拖拽开始出错:', err);
+      e.preventDefault();
+    }
+  }
+
+  function handleCalDragOver(e, dateStr) {
+    try {
+      if (!dateStr || !parseSafeDate(dateStr)) {
+        return;
+      }
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      setDragOverDate(dateStr);
+    } catch (err) {
+      console.warn('拖拽悬停出错:', err);
+    }
+  }
+
+  function handleCalDragLeave() {
+    try {
+      setDragOverDate(null);
+    } catch (err) {
+      console.warn('拖拽离开出错:', err);
+    }
+  }
+
+  function handleCalDrop(e, dateStr) {
+    try {
+      e.preventDefault();
+      setDragOverDate(null);
+      if (!draggingRecord || !draggingRecord.id) {
+        setDraggingRecord(null);
+        return;
+      }
+      if (!dateStr || !parseSafeDate(dateStr)) {
+        setDraggingRecord(null);
+        return;
+      }
+      if (dateStr === draggingRecord.plannedDate) {
+        setDraggingRecord(null);
+        return;
+      }
+      setReasonModal({
+        open: true,
+        recordId: draggingRecord.id,
+        oldDate: draggingRecord.plannedDate || '',
+        newDate: dateStr,
+      });
+      setReasonText('');
+      setDraggingRecord(null);
+    } catch (err) {
+      console.warn('拖拽放置出错:', err);
+      setDraggingRecord(null);
+      setDragOverDate(null);
+    }
+  }
+
+  function confirmReasonModal() {
+    try {
+      if (!reasonText.trim()) {
+        alert('请填写调整原因');
+        return;
+      }
+      const { recordId, newDate } = reasonModal;
+      if (!recordId || !newDate || !parseSafeDate(newDate)) {
+        setReasonModal({ open: false, recordId: null, oldDate: '', newDate: '' });
+        setReasonText('');
+        return;
+      }
+      const rec = records.find(r => r.id === recordId);
+      if (!rec) {
+        setReasonModal({ open: false, recordId: null, oldDate: '', newDate: '' });
+        setReasonText('');
+        return;
+      }
+      const windowDays = Number(rec.windowDays) || 0;
+      let newStatus;
+      try {
+        newStatus = computeVisitStatus(newDate, windowDays, null);
+      } catch (e) {
+        console.warn('计算访视状态出错:', e);
+        newStatus = rec.status || '待访视';
+      }
+      const reason = reasonText.trim();
+      const next = records.map(item => {
+        if (item.id !== recordId) return item;
+        const oldDeviation = item.deviation || '';
+        const newDeviation = oldDeviation
+          ? `${oldDeviation}；预约日调整至${newDate}（${reason}）`
+          : `预约日调整至${newDate}（${reason}）`;
+        const oldTimeline = item.timeline || [];
+        const newTimelineEntry = {
+          status: newStatus,
+          at: today,
+          by: `拖动调整→${newDate}，原因：${reason}`
+        };
+        return {
+          ...item,
+          plannedDate: newDate,
+          status: newStatus,
+          deviation: newDeviation,
+          timeline: [...oldTimeline, newTimelineEntry],
+        };
+      });
+      persist(next);
+      if (selected?.id === recordId) {
+        const updated = next.find(r => r.id === recordId);
+        if (updated) setSelected(updated);
+      }
+      setReasonModal({ open: false, recordId: null, oldDate: '', newDate: '' });
+      setReasonText('');
+    } catch (err) {
+      console.error('确认调整日期出错:', err);
+      alert('操作失败，请重试');
+      setReasonModal({ open: false, recordId: null, oldDate: '', newDate: '' });
+      setReasonText('');
+    }
+  }
+
+  function cancelReasonModal() {
+    setReasonModal({ open: false, recordId: null, oldDate: '', newDate: '' });
+    setReasonText('');
+  }
+
   const batchStats = useMemo(() => {
     const total = batchParsedData.length;
     const valid = batchParsedData.filter((_, idx) => !batchErrors[idx]).length;
@@ -883,6 +1139,66 @@ function App() {
     });
   }, [reminderVisits, reminderGroupFilter, reminderCategoryFilter, reminderDateStart, reminderDateEnd]);
 
+  const calRecordsWithWindow = useMemo(() => {
+    return records
+      .filter(r => {
+        if (!r) return false;
+        if (!r.plannedDate) return false;
+        if (parseSafeDate(r.plannedDate) === null) return false;
+        if (calSubjectFilter !== '全部' && r.subjectNo !== calSubjectFilter) return false;
+        if (calGroupFilter !== '全部' && r.group !== calGroupFilter) return false;
+        return true;
+      })
+      .map(r => {
+        try {
+          const w = computeWindowDates(r);
+          return { ...r, windowStart: w.windowStart, windowEnd: w.windowEnd, targetDate: w.targetDate, allWindowDates: w.allDates };
+        } catch (e) {
+          console.warn('计算访视窗口出错:', r, e);
+          return { ...r, windowStart: null, windowEnd: null, targetDate: r.plannedDate, allWindowDates: [r.plannedDate] };
+        }
+      })
+      .filter(r => r.allWindowDates && r.allWindowDates.length > 0);
+  }, [records, calSubjectFilter, calGroupFilter]);
+
+  const calMonthGrid = useMemo(() => {
+    const d = parseSafeDate(calBaseDate) || new Date();
+    return getCalendarMonthGrid(d.getFullYear(), d.getMonth());
+  }, [calBaseDate]);
+
+  const calWeekDays = useMemo(() => {
+    return getWeekDays(calBaseDate);
+  }, [calBaseDate]);
+
+  const calVisitsByDate = useMemo(() => {
+    const map = {};
+    calRecordsWithWindow.forEach(r => {
+      try {
+        const dates = r.allWindowDates || [r.targetDate || r.plannedDate];
+        dates.forEach(ds => {
+          if (!ds) return;
+          (map[ds] ||= []).push(r);
+        });
+      } catch (e) {
+        console.warn('处理日历访视数据出错:', r, e);
+      }
+    });
+    return map;
+  }, [calRecordsWithWindow]);
+
+  const calMonthLabel = useMemo(() => {
+    const d = parseSafeDate(calBaseDate) || new Date();
+    return `${d.getFullYear()}年${d.getMonth() + 1}月`;
+  }, [calBaseDate]);
+
+  const calWeekLabel = useMemo(() => {
+    const days = calWeekDays;
+    if (days.length === 0) return '';
+    const s = days[0];
+    const e = days[6];
+    return `${s.getMonth() + 1}月${s.getDate()}日 — ${e.getMonth() + 1}月${e.getDate()}日`;
+  }, [calWeekDays]);
+
   useEffect(() => {
     if (reminderSelected.size === 0) return;
     const visibleIds = new Set(filteredReminderVisits.map(v => v.id));
@@ -950,6 +1266,13 @@ function App() {
           onClick={() => setActiveTab('reminder')}
         >
           <Bell size={16} />访视提醒
+        </button>
+        <button
+          type="button"
+          className={'tab-btn ' + (activeTab === 'calendar' ? 'active' : '')}
+          onClick={() => setActiveTab('calendar')}
+        >
+          <CalendarDays size={16} />访视日历
         </button>
       </div>
 
@@ -1522,6 +1845,229 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
               </div>
             )}
           </section>
+        </section>
+      ) : activeTab === 'calendar' ? (
+        <section className="cal-workspace">
+          <section className="panel cal-control-panel">
+            <div className="panel-title">
+              <CalendarDays size={18} />
+              <h2>访视日历排程</h2>
+            </div>
+
+            <div className="cal-view-toggle">
+              <button type="button" className={'cal-view-btn ' + (calView === 'month' ? 'active' : '')} onClick={() => setCalView('month')}>月视图</button>
+              <button type="button" className={'cal-view-btn ' + (calView === 'week' ? 'active' : '')} onClick={() => setCalView('week')}>周视图</button>
+            </div>
+
+            <div className="cal-nav">
+              <button type="button" className="cal-nav-btn" onClick={() => calNavigate(-1)}><ChevronLeft size={18} /></button>
+              <strong className="cal-nav-label">{calView === 'month' ? calMonthLabel : calWeekLabel}</strong>
+              <button type="button" className="cal-nav-btn" onClick={() => calNavigate(1)}><ChevronRight size={18} /></button>
+              <button type="button" className="link-btn" onClick={calGoToday} style={{ marginLeft: 8 }}>今天</button>
+            </div>
+
+            <div className="cal-filters">
+              <label>
+                <span>受试者</span>
+                <select value={calSubjectFilter} onChange={e => setCalSubjectFilter(e.target.value)}>
+                  <option>全部</option>
+                  {[...new Set(records.map(r => r.subjectNo))].map(s => <option key={s}>{s}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>试验分组</span>
+                <select value={calGroupFilter} onChange={e => setCalGroupFilter(e.target.value)}>
+                  <option>全部</option>
+                  {appConfig.fields.find(f => f.key === 'group')?.options.map(opt => <option key={opt}>{opt}</option>)}
+                </select>
+              </label>
+            </div>
+
+            <div className="cal-legend">
+              <div className="cal-legend-item"><span className="cal-legend-dot dot-window-start" />窗口开始</div>
+              <div className="cal-legend-item"><span className="cal-legend-dot dot-target" />目标日期</div>
+              <div className="cal-legend-item"><span className="cal-legend-dot dot-window-end" />窗口结束</div>
+              <div className="cal-legend-item"><span className="cal-legend-dot dot-in-window" />窗口内</div>
+              <div className="cal-legend-item"><span className="cal-legend-dot dot-completed" />已完成</div>
+              <div className="cal-legend-item"><span className="cal-legend-dot dot-overdue" />已超窗</div>
+            </div>
+
+            <div className="cal-drag-hint">
+              <GripVertical size={14} /> 拖动访视标记可调整预约日期（已完成的访视不可拖动）
+            </div>
+          </section>
+
+          <section className="panel cal-grid-panel">
+            {calView === 'month' ? (
+              <div className="cal-month">
+                <div className="cal-weekday-header">
+                  {['一', '二', '三', '四', '五', '六', '日'].map(d => <div key={d} className="cal-weekday-cell">{d}</div>)}
+                </div>
+                <div className="cal-month-grid">
+                  {calMonthGrid.map((date, idx) => {
+                    const ds = toISODate(date);
+                    const isCurrentMonth = parseSafeDate(calBaseDate) && date.getMonth() === parseSafeDate(calBaseDate).getMonth();
+                    const isToday = ds === today;
+                    const isDragOver = dragOverDate === ds;
+                    const visits = calVisitsByDate[ds] || [];
+                    const uniqueVisits = [];
+                    const seenIds = new Set();
+                    visits.forEach(v => { if (!seenIds.has(v.id)) { seenIds.add(v.id); uniqueVisits.push(v); } });
+                    return (
+                      <div
+                        key={idx}
+                        className={'cal-day-cell' + (isCurrentMonth ? ' current-month' : '') + (isToday ? ' is-today' : '') + (isDragOver ? ' drag-over' : '')}
+                        onDragOver={e => handleCalDragOver(e, ds)}
+                        onDragLeave={handleCalDragLeave}
+                        onDrop={e => handleCalDrop(e, ds)}
+                      >
+                        <div className="cal-day-number">{date.getDate()}</div>
+                        <div className="cal-day-visits">
+                          {uniqueVisits.slice(0, 4).map(v => {
+                            let dotType = 'dot-in-window';
+                            let labelSuffix = '';
+                            if (v.status === '已完成') {
+                              dotType = 'dot-completed';
+                            } else if (v.status === '已超窗') {
+                              dotType = 'dot-overdue';
+                            } else if (v.windowStart === ds && v.windowEnd === ds) {
+                              dotType = 'dot-target';
+                              labelSuffix = '(目标)';
+                            } else if (v.targetDate === ds) {
+                              dotType = 'dot-target';
+                              labelSuffix = '(目标)';
+                            } else if (v.windowStart === ds) {
+                              dotType = 'dot-window-start';
+                              labelSuffix = '(窗口开)';
+                            } else if (v.windowEnd === ds) {
+                              dotType = 'dot-window-end';
+                              labelSuffix = '(窗口关)';
+                            }
+                            return (
+                              <div
+                                key={v.id + '-' + dotType}
+                                className={'cal-visit-tag ' + dotType + (v.status === '已完成' ? ' completed' : '')}
+                                draggable={v.status !== '已完成'}
+                                onDragStart={e => handleCalDragStart(e, v)}
+                                title={`${v.subjectNo} ${v.visitName} · ${v.status} · 窗口 ${v.windowStart}~${v.windowEnd}`}
+                              >
+                                <span className="cal-visit-dot" />
+                                <span className="cal-visit-text">{v.subjectNo}-{v.visitName}{labelSuffix}</span>
+                              </div>
+                            );
+                          })}
+                          {uniqueVisits.length > 4 && <div className="cal-more-visits">+{uniqueVisits.length - 4}项</div>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="cal-week">
+                <div className="cal-weekday-header">
+                  {['周一', '周二', '周三', '周四', '周五', '周六', '周日'].map(d => <div key={d} className="cal-weekday-cell">{d}</div>)}
+                </div>
+                <div className="cal-week-grid">
+                  {calWeekDays.map((date, idx) => {
+                    const ds = toISODate(date);
+                    const isToday = ds === today;
+                    const isDragOver = dragOverDate === ds;
+                    const visits = calVisitsByDate[ds] || [];
+                    const uniqueVisits = [];
+                    const seenIds = new Set();
+                    visits.forEach(v => { if (!seenIds.has(v.id)) { seenIds.add(v.id); uniqueVisits.push(v); } });
+                    return (
+                      <div
+                        key={idx}
+                        className={'cal-week-col' + (isToday ? ' is-today' : '') + (isDragOver ? ' drag-over' : '')}
+                        onDragOver={e => handleCalDragOver(e, ds)}
+                        onDragLeave={handleCalDragLeave}
+                        onDrop={e => handleCalDrop(e, ds)}
+                      >
+                        <div className="cal-week-col-header">
+                          <span className="cal-week-col-date">{date.getMonth() + 1}/{date.getDate()}</span>
+                        </div>
+                        <div className="cal-week-col-visits">
+                          {uniqueVisits.map(v => {
+                            let dotType = 'dot-in-window';
+                            let labelSuffix = '';
+                            if (v.status === '已完成') {
+                              dotType = 'dot-completed';
+                            } else if (v.status === '已超窗') {
+                              dotType = 'dot-overdue';
+                            } else if (v.windowStart === ds && v.windowEnd === ds) {
+                              dotType = 'dot-target';
+                              labelSuffix = ' · 目标日期';
+                            } else if (v.targetDate === ds) {
+                              dotType = 'dot-target';
+                              labelSuffix = ' · 目标日期';
+                            } else if (v.windowStart === ds) {
+                              dotType = 'dot-window-start';
+                              labelSuffix = ' · 窗口开始';
+                            } else if (v.windowEnd === ds) {
+                              dotType = 'dot-window-end';
+                              labelSuffix = ' · 窗口结束';
+                            }
+                            return (
+                              <div
+                                key={v.id + '-' + dotType}
+                                className={'cal-week-visit-card ' + dotType + (v.status === '已完成' ? ' completed' : '')}
+                                draggable={v.status !== '已完成'}
+                                onDragStart={e => handleCalDragStart(e, v)}
+                                title={`${v.subjectNo} ${v.visitName} · ${v.status} · 窗口 ${v.windowStart}~${v.windowEnd}`}
+                              >
+                                <div className="cal-week-visit-header">
+                                  <span className="cal-visit-dot" />
+                                  <strong>{v.subjectNo} · {v.visitName}{labelSuffix}</strong>
+                                </div>
+                                <div className="cal-week-visit-info">
+                                  <span>{v.group}</span>
+                                  <span>±{v.windowDays}天</span>
+                                  <span className={'status ' + statusClass(v.status)} style={{ fontSize: 11, padding: '2px 6px' }}>{v.status}</span>
+                                </div>
+                                <div className="cal-week-visit-window">
+                                  窗口：{v.windowStart || '-'} ~ {v.windowEnd || '-'}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </section>
+
+          {reasonModal.open && (
+            <div className="modal-overlay" onClick={cancelReasonModal}>
+              <div className="modal-box" onClick={e => e.stopPropagation()}>
+                <div className="modal-title">
+                  <AlertCircle size={20} />
+                  <h3>预约日期调整确认</h3>
+                </div>
+                <div className="modal-body">
+                  <p>计划访视日期：<strong>{reasonModal.oldDate}</strong> → <strong>{reasonModal.newDate}</strong></p>
+                  <label style={{ marginTop: 12 }}>
+                    <span>调整原因（必填）</span>
+                    <textarea
+                      value={reasonText}
+                      onChange={e => setReasonText(e.target.value)}
+                      placeholder="请输入调整预约日期的原因..."
+                      rows={3}
+                      autoFocus
+                    />
+                  </label>
+                </div>
+                <div className="modal-actions">
+                  <button type="button" className="modal-cancel-btn" onClick={cancelReasonModal}>取消</button>
+                  <button type="button" className="primary" style={{ marginTop: 0, width: 'auto', padding: '10px 24px' }} onClick={confirmReasonModal} disabled={!reasonText.trim()}>确认调整</button>
+                </div>
+              </div>
+            </div>
+          )}
         </section>
       ) : (
         <section className="workspace">
