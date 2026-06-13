@@ -3,6 +3,7 @@ import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTria
 import './App.css';
 
 const DEVIATION_STORAGE = 'hxwl-61309-deviation-records';
+const DEVIATION_MIGRATION_FLAG = 'hxwl-61309-deviation-migrated-v1';
 
 const DEVIATION_TYPES = [
   '访视超窗',
@@ -287,6 +288,113 @@ function hasDuplicateDeviation(deviations, visitRecordId, deviationType, exclude
            d.deviationType === deviationType &&
            DEVIATION_STATUS_NOT_CLOSED.includes(d.status);
   });
+}
+
+function wouldCreateDuplicate(deviations, targetDeviation) {
+  const { id, visitRecordId, deviationType, status } = targetDeviation;
+  if (!DEVIATION_STATUS_NOT_CLOSED.includes(status)) return false;
+  return hasDuplicateDeviation(deviations, visitRecordId, deviationType, id);
+}
+
+function inferDeviationType(description) {
+  if (!description) return '其他';
+  const desc = String(description);
+  if (/超窗|迟到|超期|逾期|延迟|超出窗口|超过.*天/.test(desc)) return '访视超窗';
+  if (/遗漏|漏做|未做|缺失|缺少/.test(desc)) return '检查项目遗漏';
+  if (/剂量|药量|用量/.test(desc)) return '用药剂量偏差';
+  if (/方案|流程|未按|不符合/.test(desc)) return '未按方案用药';
+  if (/标本|采样|血液|血样|尿样/.test(desc)) return '标本采集/处理错误';
+  if (/知情|ICF|同意/.test(desc)) return 'ICF签署问题';
+  if (/入组|排除|筛选/.test(desc)) return '入组/排除标准不符合';
+  if (/伴随用药|合并用药/.test(desc)) return '伴随用药违规';
+  if (/AE|不良事件|不良反应/.test(desc)) return '不良事件漏报';
+  if (/预约|调整|日期|改期/.test(desc)) return '访视超窗';
+  return '其他';
+}
+
+function inferSeverity(description) {
+  if (!description) return '轻度';
+  const desc = String(description);
+  if (/严重|重大|威胁|永久|危及|死亡|SAE/.test(desc)) return '严重';
+  if (/明显|较大|中度|多天|超过7|>7/.test(desc)) return '重度';
+  if (/轻微|小|1天|2天|3天/.test(desc)) return '轻度';
+  return '轻度';
+}
+
+function migrateLegacyDeviations(records, existingDeviations) {
+  try {
+    if (localStorage.getItem(DEVIATION_MIGRATION_FLAG) === '1') {
+      return { deviations: existingDeviations, migrated: 0, skipped: 0 };
+    }
+  } catch (e) {
+    // 忽略存储错误
+  }
+
+  const resultDeviations = [...existingDeviations];
+  let migrated = 0;
+  let skipped = 0;
+
+  for (const rec of records) {
+    if (!rec || !rec.deviation || !String(rec.deviation).trim()) {
+      continue;
+    }
+    const description = String(rec.deviation).trim();
+    const inferredType = inferDeviationType(description);
+    const inferredSeverity = inferSeverity(description);
+
+    if (hasDuplicateDeviation(resultDeviations, rec.id, inferredType)) {
+      skipped++;
+      continue;
+    }
+
+    const plannedDate = rec.plannedDate || rec.scheduledDate || '';
+    const actualDate = rec.actualDate || rec.scheduledDate || plannedDate || '';
+    let deviationDays = 0;
+    if (plannedDate && actualDate) {
+      const a = parseSafeDate(actualDate);
+      const p = parseSafeDate(plannedDate);
+      if (a && p) {
+        deviationDays = Math.abs(Math.round((a - p) / (1000 * 60 * 60 * 24)));
+      }
+    }
+
+    const migratedDev = {
+      id: uid(),
+      subjectNo: rec.subjectNo || '',
+      group: rec.group || '',
+      visitName: rec.visitName || '',
+      visitRecordId: rec.id,
+      enrollDate: rec.enrollDate || '',
+      deviationType: inferredType,
+      occurrenceDate: actualDate || rec.enrollDate || today,
+      severity: inferredSeverity,
+      description,
+      rootCause: '',
+      correctiveAction: '',
+      responsiblePerson: '',
+      status: rec.status === '已完成' ? '已关闭' : '调查中',
+      source: '历史数据迁移',
+      createdAt: rec.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      timeline: [{
+        status: rec.status === '已完成' ? '已关闭' : '调查中',
+        at: today,
+        by: '系统迁移',
+        note: `从访视记录的偏差文本迁移，原始记录创建于 ${rec.createdAt ? new Date(rec.createdAt).toLocaleDateString('zh-CN') : '未知日期'}`
+      }],
+      deviationDays
+    };
+    resultDeviations.unshift(migratedDev);
+    migrated++;
+  }
+
+  try {
+    localStorage.setItem(DEVIATION_MIGRATION_FLAG, '1');
+  } catch (e) {
+    // 忽略
+  }
+
+  return { deviations: resultDeviations, migrated, skipped };
 }
 
 function createDeviationFromVisit(record, extra = {}) {
@@ -700,6 +808,8 @@ function App() {
     type: '全部'
   });
   const [devBatchResult, setDevBatchResult] = useState({ show: false, count: 0, skipped: 0 });
+  const [devMigrationResult, setDevMigrationResult] = useState({ show: false, migrated: 0, skipped: 0 });
+  const devMigratedRef = useRef(false);
 
   function persist(next) {
     try {
@@ -848,9 +958,13 @@ function App() {
       const existing = deviations.find(d => d.id === devFormEditId);
       if (!existing) return;
 
-      if (existing.status !== '已关闭' && DEVIATION_STATUS_NOT_CLOSED.includes(devForm.status)) {
+      const willBeOpen = DEVIATION_STATUS_NOT_CLOSED.includes(devForm.status);
+      const typeOrVisitChanged = existing.deviationType !== deviationType || existing.visitRecordId !== visitRecordId;
+      const reopeningFromClosed = existing.status === '已关闭' && willBeOpen;
+
+      if (willBeOpen && (typeOrVisitChanged || reopeningFromClosed)) {
         if (hasDuplicateDeviation(deviations, visitRecordId, deviationType, devFormEditId)) {
-          alert(`该访视已存在另一条未关闭的「${deviationType}」偏差，无法修改。`);
+          alert(`该访视已存在另一条未关闭的「${deviationType}」偏差，无法${reopeningFromClosed ? '重新开启' : '修改'}。\n请先关闭现有偏差后再操作。`);
           return;
         }
       }
@@ -896,6 +1010,17 @@ function App() {
   function updateDeviationStatus(devId, newStatus) {
     const existing = deviations.find(d => d.id === devId);
     if (!existing) return;
+
+    const willBeOpen = DEVIATION_STATUS_NOT_CLOSED.includes(newStatus);
+    const reopeningFromClosed = existing.status === '已关闭' && willBeOpen;
+
+    if (willBeOpen && (reopeningFromClosed || existing.status !== newStatus)) {
+      if (hasDuplicateDeviation(deviations, existing.visitRecordId, existing.deviationType, devId)) {
+        alert(`该访视已存在另一条未关闭的「${existing.deviationType}」偏差，无法${reopeningFromClosed ? '重新开启' : '变更状态'}。\n请先关闭现有同类型偏差后再操作。`);
+        return;
+      }
+    }
+
     const nextTimeline = [...(existing.timeline || [])];
     if (existing.status !== newStatus) {
       nextTimeline.push({
@@ -2020,6 +2145,17 @@ function App() {
       setReminderSelected(next);
     }
   }, [filteredReminderVisits]);
+
+  useEffect(() => {
+    if (devMigratedRef.current) return;
+    devMigratedRef.current = true;
+    const result = migrateLegacyDeviations(records, deviations);
+    if (result.migrated > 0 || result.skipped > 0) {
+      persistDeviations(result.deviations);
+      setDevMigrationResult({ show: true, migrated: result.migrated, skipped: result.skipped });
+      setTimeout(() => setDevMigrationResult({ show: false, migrated: 0, skipped: 0 }), 6000);
+    }
+  }, [records, deviations]);
 
   const reminderStats = useMemo(() => ({
     '已超窗': reminderVisits.filter(v => v.category === '已超窗').length,
@@ -3338,6 +3474,14 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
                 <Check size={14} />
                 自动创建完成：新增 <strong>{devBatchResult.count}</strong> 条，
                 跳过重复 <strong>{devBatchResult.skipped}</strong> 条
+              </div>
+            )}
+
+            {devMigrationResult.show && (
+              <div className="dev-batch-result" style={{ background: '#ecfeff', borderColor: '#06b6d4', color: '#0e7490' }}>
+                <FileText size={14} />
+                历史偏差数据迁移完成：成功迁移 <strong>{devMigrationResult.migrated}</strong> 条，
+                跳过已有记录 <strong>{devMigrationResult.skipped}</strong> 条
               </div>
             )}
 
