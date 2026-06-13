@@ -266,15 +266,20 @@ function toISODate(d) {
 
 function computeWindowDates(record) {
   if (!record || typeof record !== 'object') {
-    return { windowStart: null, windowEnd: null, targetDate: null, allDates: [] };
+    return { windowStart: null, windowEnd: null, targetDate: null, scheduledDate: null, allDates: [] };
   }
-  const effectiveDate = record.scheduledDate || record.plannedDate || '';
+  const plannedDate = record.plannedDate || '';
+  const scheduledDate = record.scheduledDate || plannedDate || '';
   const windowDays = Number(record.windowDays) || 0;
-  if (!effectiveDate || !parseSafeDate(effectiveDate)) {
-    return { windowStart: null, windowEnd: null, targetDate: null, allDates: [] };
+  const hasValidPlannedDate = plannedDate && parseSafeDate(plannedDate);
+  const hasValidScheduledDate = scheduledDate && parseSafeDate(scheduledDate);
+
+  if (!hasValidPlannedDate && !hasValidScheduledDate) {
+    return { windowStart: null, windowEnd: null, targetDate: null, scheduledDate: null, allDates: [] };
   }
-  const ws = safeAddDays(effectiveDate, -windowDays);
-  const we = safeAddDays(effectiveDate, windowDays);
+
+  const ws = hasValidPlannedDate ? safeAddDays(plannedDate, -windowDays) : null;
+  const we = hasValidPlannedDate ? safeAddDays(plannedDate, windowDays) : null;
   const allDates = [];
   if (ws && we) {
     const start = parseSafeDate(ws);
@@ -295,7 +300,16 @@ function computeWindowDates(record) {
       }
     }
   }
-  return { windowStart: ws, windowEnd: we, targetDate: effectiveDate, allDates };
+  if (hasValidScheduledDate && !allDates.includes(scheduledDate)) {
+    allDates.push(scheduledDate);
+  }
+  return {
+    windowStart: ws,
+    windowEnd: we,
+    targetDate: hasValidPlannedDate ? plannedDate : null,
+    scheduledDate: hasValidScheduledDate ? scheduledDate : null,
+    allDates,
+  };
 }
 
 function getCalendarMonthGrid(year, month) {
@@ -1281,7 +1295,7 @@ function App() {
       .map(r => {
         try {
           const w = computeWindowDates(r);
-          return { ...r, windowStart: w.windowStart, windowEnd: w.windowEnd, targetDate: w.targetDate, allWindowDates: w.allDates };
+          return { ...r, windowStart: w.windowStart, windowEnd: w.windowEnd, targetDate: w.targetDate, scheduledDate: w.scheduledDate || r.scheduledDate, allWindowDates: w.allDates };
         } catch (e) {
           console.warn('计算访视窗口出错:', r, e);
           const effectiveDate = r.scheduledDate || r.plannedDate;
@@ -2066,6 +2080,9 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
                             } else if (v.targetDate === ds) {
                               dotType = 'dot-target';
                               labelSuffix = '(目标)';
+                            } else if (v.scheduledDate === ds && v.scheduledDate !== v.targetDate) {
+                              dotType = 'dot-in-window';
+                              labelSuffix = '(预约)';
                             } else if (v.windowStart === ds) {
                               dotType = 'dot-window-start';
                               labelSuffix = '(窗口开)';
@@ -2132,6 +2149,9 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
                             } else if (v.targetDate === ds) {
                               dotType = 'dot-target';
                               labelSuffix = ' · 目标日期';
+                            } else if (v.scheduledDate === ds && v.scheduledDate !== v.targetDate) {
+                              dotType = 'dot-in-window';
+                              labelSuffix = ' · 预约日期';
                             } else if (v.windowStart === ds) {
                               dotType = 'dot-window-start';
                               labelSuffix = ' · 窗口开始';
