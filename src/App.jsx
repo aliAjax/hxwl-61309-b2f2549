@@ -1253,13 +1253,34 @@ function App() {
     setExecutionForm({ ...executionForm, executionItems: nextItems });
   }
 
+  function getUnprocessedRequiredItems() {
+    if (!executionForm) return [];
+    const { executionItems } = executionForm;
+    if (!executionItems || executionItems.length === 0) return [];
+    return executionItems.filter(item => {
+      if (!item.required) return false;
+      if (item.status === 'done') return false;
+      if (item.status === 'skipped' && item.reason && item.reason.trim()) return false;
+      return true;
+    });
+  }
+
+  function getSkippedItemsWithoutReason() {
+    if (!executionForm) return [];
+    const { executionItems } = executionForm;
+    if (!executionItems || executionItems.length === 0) return [];
+    return executionItems.filter(item =>
+      item.status === 'skipped' && (!item.reason || !item.reason.trim())
+    );
+  }
+
   function canCompleteVisit() {
     if (!executionForm) return false;
     const { executionItems } = executionForm;
     if (!executionItems || executionItems.length === 0) return false;
-    const requiredItems = executionItems.filter(item => item.required);
-    if (requiredItems.length === 0) return true;
-    return requiredItems.every(item => item.status === 'done');
+    if (getUnprocessedRequiredItems().length > 0) return false;
+    if (getSkippedItemsWithoutReason().length > 0) return false;
+    return true;
   }
 
   function isDateOutOfWindow(actualDate, record) {
@@ -1286,8 +1307,16 @@ function App() {
 
   function saveExecutionAndComplete() {
     if (!executionForm || !executionSelected) return;
-    if (!canCompleteVisit()) {
-      alert('必填检查项目未全部完成，无法标记为已完成！');
+    const unprocessed = getUnprocessedRequiredItems();
+    const skippedNoReason = getSkippedItemsWithoutReason();
+    if (unprocessed.length > 0) {
+      const names = unprocessed.map(i => `"${i.name}"`).join('、');
+      alert(`以下必填检查项目尚未处理完成：\n${names}\n\n必填项需标记为"已完成"，或标记为"未完成"并填写原因。`);
+      return;
+    }
+    if (skippedNoReason.length > 0) {
+      const names = skippedNoReason.map(i => `"${i.name}"`).join('、');
+      alert(`以下标记为"未完成"的检查项目未填写原因：\n${names}\n\n请为所有未完成项目补充原因说明。`);
       return;
     }
     const actualDate = executionForm.actualDate || today;
@@ -1333,6 +1362,7 @@ function App() {
   function saveExecutionDraft() {
     if (!executionForm || !executionSelected) return;
     const actualDate = executionForm.actualDate || '';
+    const skippedNoReason = getSkippedItemsWithoutReason();
     const next = records.map(item => {
       if (item.id !== executionSelected.id) return item;
       const oldTimeline = item.timeline || [];
@@ -1356,7 +1386,12 @@ function App() {
       setExecutionSelected(updated);
       setExecutionForm({ ...executionForm, ...updated });
     }
-    alert('执行记录已保存为草稿。');
+    if (skippedNoReason.length > 0) {
+      const names = skippedNoReason.map(i => `"${i.name}"`).join('、');
+      alert(`草稿已保存。\n\n注意：以下未完成项目尚未填写原因，完成访视前必须补充：\n${names}`);
+    } else {
+      alert('执行记录已保存为草稿。');
+    }
   }
 
   function toggleItemRequired(itemId) {
@@ -1369,16 +1404,32 @@ function App() {
 
   const executionStats = useMemo(() => {
     if (!executionForm || !executionForm.executionItems) {
-      return { total: 0, done: 0, pending: 0, skipped: 0, requiredTotal: 0, requiredDone: 0 };
+      return {
+        total: 0,
+        done: 0,
+        pending: 0,
+        skipped: 0,
+        requiredTotal: 0,
+        requiredDone: 0,
+        requiredHandled: 0,
+        skippedNoReason: 0,
+      };
     }
     const items = executionForm.executionItems;
+    const requiredItems = items.filter(i => i.required);
     return {
       total: items.length,
       done: items.filter(i => i.status === 'done').length,
       pending: items.filter(i => i.status === 'pending').length,
       skipped: items.filter(i => i.status === 'skipped').length,
-      requiredTotal: items.filter(i => i.required).length,
-      requiredDone: items.filter(i => i.required && i.status === 'done').length,
+      requiredTotal: requiredItems.length,
+      requiredDone: requiredItems.filter(i => i.status === 'done').length,
+      requiredHandled: requiredItems.filter(i =>
+        i.status === 'done' || (i.status === 'skipped' && i.reason && i.reason.trim())
+      ).length,
+      skippedNoReason: items.filter(i =>
+        i.status === 'skipped' && (!i.reason || !i.reason.trim())
+      ).length,
     };
   }, [executionForm]);
 
@@ -2514,15 +2565,25 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
                     <span className="exec-stat-label">待执行</span>
                     <strong className="exec-stat-value">{executionStats.pending}</strong>
                   </div>
-                  <div className="exec-stat skipped">
+                  <div className={'exec-stat skipped' + (executionStats.skippedNoReason > 0 ? ' alert' : '')}>
                     <span className="exec-stat-label">未完成</span>
-                    <strong className="exec-stat-value">{executionStats.skipped}</strong>
+                    <strong className="exec-stat-value">
+                      {executionStats.skipped}
+                      {executionStats.skippedNoReason > 0 && <sup style={{ color: '#dc2626' }}> ({executionStats.skippedNoReason}缺原因)</sup>}
+                    </strong>
                   </div>
                   <div className="exec-stat required">
-                    <span className="exec-stat-label">必填项进度</span>
-                    <strong className="exec-stat-value">{executionStats.requiredDone}/{executionStats.requiredTotal}</strong>
+                    <span className="exec-stat-label">必填项已处理</span>
+                    <strong className="exec-stat-value">{executionStats.requiredHandled}/{executionStats.requiredTotal}</strong>
                   </div>
                 </div>
+
+                {executionStats.skippedNoReason > 0 && (
+                  <div className="exec-alert warning">
+                    <AlertTriangle size={16} />
+                    <span>有 <strong>{executionStats.skippedNoReason}</strong> 项未完成检查项目尚未填写原因，完成访视前必须补充。</span>
+                  </div>
+                )}
 
                 <div className="execution-sub-tabs">
                   <button
@@ -2550,8 +2611,10 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
 
                 {executionTab === 'items' && (
                   <div className="execution-items-list">
-                    {executionForm.executionItems.map(item => (
-                      <div key={item.id} className={'exec-item ' + item.status + (item.required ? ' required' : '')}>
+                    {executionForm.executionItems.map(item => {
+                      const missingReason = item.status === 'skipped' && (!item.reason || !item.reason.trim());
+                      return (
+                      <div key={item.id} className={'exec-item ' + item.status + (item.required ? ' required' : '') + (missingReason ? ' missing-reason' : '')}>
                         <div className="exec-item-head">
                           <label className="exec-item-checkbox" onClick={e => e.stopPropagation()}>
                             <input
@@ -2568,9 +2631,24 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
                               {item.name}
                               {item.required && <span className="required-tag">必填</span>}
                             </h4>
-                            <span className={'exec-item-status-badge ' + item.status}>
-                              {item.status === 'done' ? '已完成' : item.status === 'skipped' ? '未完成' : '待执行'}
-                            </span>
+                            <div className="exec-item-status-row">
+                              <span className={'exec-item-status-badge ' + item.status}>
+                                {item.status === 'done' ? '已完成' : item.status === 'skipped' ? '未完成' : '待执行'}
+                              </span>
+                              {missingReason && (
+                                <span className="exec-item-warning">
+                                  <AlertTriangle size={12} />缺原因
+                                </span>
+                              )}
+                              {item.required && item.status === 'pending' && (
+                                <span className="exec-item-hint">待处理</span>
+                              )}
+                              {item.required && item.status === 'skipped' && !missingReason && (
+                                <span className="exec-item-ok">
+                                  <Check size={12} />必填项已说明
+                                </span>
+                              )}
+                            </div>
                           </div>
                           <div className="exec-item-actions" onClick={e => e.stopPropagation()}>
                             <button
@@ -2620,7 +2698,8 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
                           </div>
                         )}
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
 
@@ -2690,15 +2769,43 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
                     style={{ marginTop: 0 }}
                   >
                     <CheckCircle2 size={16} />
-                    {canCompleteVisit() ? '完成访视' : '必填项未完成'}
+                    {canCompleteVisit() ? '完成访视' : '校验未通过'}
                   </button>
                 </div>
 
-                {!canCompleteVisit() && executionStats.requiredTotal > 0 && (
-                  <p className="hint" style={{ marginTop: 10, color: '#dc2626' }}>
-                    <AlertTriangle size={14} style={{ verticalAlign: -2 }} />
-                    还有 {executionStats.requiredTotal - executionStats.requiredDone} 项必填检查项目未完成，无法标记访视完成。
-                  </p>
+                {!canCompleteVisit() && (
+                  <div className="exec-alert error" style={{ marginTop: 12 }}>
+                    <AlertCircle size={16} />
+                    <div className="exec-alert-content">
+                      <strong>无法完成访视，存在以下问题：</strong>
+                      <ul className="exec-alert-list">
+                        {(() => {
+                          const unprocessed = getUnprocessedRequiredItems();
+                          const skippedNoReason = getSkippedItemsWithoutReason();
+                          const items = [];
+                          if (unprocessed.length > 0) {
+                            const names = unprocessed.map(i => `"${i.name}"`).join('、');
+                            items.push(
+                              <li key="req">
+                                以下必填项未处理完毕：{names}
+                                <br />
+                                <em style={{ fontSize: 12, color: '#667085' }}>处理方式：标记为"已完成"，或标记为"未完成"并填写原因</em>
+                              </li>
+                            );
+                          }
+                          if (skippedNoReason.length > 0) {
+                            const names = skippedNoReason.map(i => `"${i.name}"`).join('、');
+                            items.push(
+                              <li key="skip">
+                                以下未完成项目缺少原因说明：{names}
+                              </li>
+                            );
+                          }
+                          return items;
+                        })()}
+                      </ul>
+                    </div>
+                  </div>
                 )}
               </div>
             ) : (
