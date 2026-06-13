@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Upload, FileSpreadsheet, Users, Check, Download, Bell, Phone, MessageSquare, Send, Clock, ChevronLeft, ChevronRight, GripVertical, AlertCircle } from 'lucide-react';
+import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Upload, FileSpreadsheet, Users, Check, Download, Bell, Phone, MessageSquare, Send, Clock, ChevronLeft, ChevronRight, GripVertical, AlertCircle, Stethoscope, Square, SquareCheckBig, FileX } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -465,6 +465,27 @@ function categoryClass(category) {
   return map[category] || 'cat-upcoming';
 }
 
+function parseItems(itemsStr) {
+  if (!itemsStr || typeof itemsStr !== 'string') return [];
+  return itemsStr
+    .split(/[、,，;；\n]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+function initExecutionItems(itemsStr, requiredItems = []) {
+  const itemNames = parseItems(itemsStr);
+  if (itemNames.length === 0) return [];
+  return itemNames.map((name, idx) => ({
+    id: `item-${idx}-${uid()}`,
+    name,
+    required: requiredItems.includes(name) || idx < 2,
+    status: 'pending',
+    result: '',
+    reason: '',
+  }));
+}
+
 function migrateRecords(records) {
   try {
     return records.map(record => {
@@ -472,6 +493,12 @@ function migrateRecords(records) {
       const migrated = { ...record };
       if (!migrated.scheduledDate && migrated.plannedDate) {
         migrated.scheduledDate = migrated.plannedDate;
+      }
+      if (!migrated.executionItems || !Array.isArray(migrated.executionItems)) {
+        migrated.executionItems = initExecutionItems(migrated.items);
+      }
+      if (!migrated.actualDate) {
+        migrated.actualDate = '';
       }
       return migrated;
     });
@@ -526,6 +553,10 @@ function App() {
   const [reasonModal, setReasonModal] = useState({ open: false, recordId: null, oldDate: '', newDate: '' });
   const [reasonText, setReasonText] = useState('');
 
+  const [executionSelected, setExecutionSelected] = useState(null);
+  const [executionForm, setExecutionForm] = useState(null);
+  const [executionTab, setExecutionTab] = useState('items');
+
   function persist(next) {
     try {
       const migrated = migrateRecords(next);
@@ -551,7 +582,9 @@ function App() {
       scheduledDate: form.plannedDate || '',
       status: form.status || appConfig.primaryStatus,
       createdAt: new Date().toISOString(),
-      timeline: [{ status: form.status || appConfig.primaryStatus, at: today, by: '录入' }]
+      timeline: [{ status: form.status || appConfig.primaryStatus, at: today, by: '录入' }],
+      executionItems: initExecutionItems(form.items),
+      actualDate: '',
     };
     persist([nextRecord, ...records]);
     setForm(appConfig.defaultValues);
@@ -595,6 +628,8 @@ function App() {
         status: initialStatus,
         createdAt: new Date().toISOString(),
         timeline: [{ status: initialStatus, at: today, by: '模板生成' }],
+        executionItems: initExecutionItems(v.items || ''),
+        actualDate: '',
       };
     });
     persist([...newRecords, ...records]);
@@ -1003,6 +1038,8 @@ function App() {
               status: initialStatus,
               createdAt: new Date().toISOString(),
               timeline: [{ status: initialStatus, at: today, by: '批量导入' }],
+              executionItems: initExecutionItems(v.items || ''),
+              actualDate: '',
             });
           }
         }
@@ -1171,6 +1208,179 @@ function App() {
     setReasonModal({ open: false, recordId: null, oldDate: '', newDate: '' });
     setReasonText('');
   }
+
+  function openExecutionWorkbench(record) {
+    const items = record.executionItems && record.executionItems.length > 0
+      ? record.executionItems
+      : initExecutionItems(record.items);
+    setExecutionSelected(record);
+    setExecutionForm({
+      ...record,
+      executionItems: items.map(item => ({ ...item })),
+      actualDate: record.actualDate || '',
+    });
+    setExecutionTab('items');
+  }
+
+  function closeExecutionWorkbench() {
+    setExecutionSelected(null);
+    setExecutionForm(null);
+  }
+
+  function updateExecutionItem(itemId, field, value) {
+    if (!executionForm) return;
+    const nextItems = executionForm.executionItems.map(item =>
+      item.id === itemId ? { ...item, [field]: value } : item
+    );
+    setExecutionForm({ ...executionForm, executionItems: nextItems });
+  }
+
+  function toggleExecutionItemStatus(itemId) {
+    if (!executionForm) return;
+    const nextItems = executionForm.executionItems.map(item => {
+      if (item.id !== itemId) return item;
+      const nextStatus = item.status === 'done' ? 'pending' : 'done';
+      return { ...item, status: nextStatus, reason: nextStatus === 'done' ? '' : item.reason };
+    });
+    setExecutionForm({ ...executionForm, executionItems: nextItems });
+  }
+
+  function setItemSkipped(itemId) {
+    if (!executionForm) return;
+    const nextItems = executionForm.executionItems.map(item =>
+      item.id === itemId ? { ...item, status: 'skipped', result: '' } : item
+    );
+    setExecutionForm({ ...executionForm, executionItems: nextItems });
+  }
+
+  function canCompleteVisit() {
+    if (!executionForm) return false;
+    const { executionItems } = executionForm;
+    if (!executionItems || executionItems.length === 0) return false;
+    const requiredItems = executionItems.filter(item => item.required);
+    if (requiredItems.length === 0) return true;
+    return requiredItems.every(item => item.status === 'done');
+  }
+
+  function isDateOutOfWindow(actualDate, record) {
+    if (!actualDate || !record) return false;
+    const plannedDate = record.plannedDate || record.scheduledDate;
+    if (!plannedDate) return false;
+    const windowDays = Number(record.windowDays) || 0;
+    const actual = parseSafeDate(actualDate);
+    const planned = parseSafeDate(plannedDate);
+    if (!actual || !planned) return false;
+    const diffDays = Math.round((actual - planned) / (1000 * 60 * 60 * 24));
+    return Math.abs(diffDays) > windowDays;
+  }
+
+  function getDeviationDays(actualDate, record) {
+    if (!actualDate || !record) return 0;
+    const plannedDate = record.plannedDate || record.scheduledDate;
+    if (!plannedDate) return 0;
+    const actual = parseSafeDate(actualDate);
+    const planned = parseSafeDate(plannedDate);
+    if (!actual || !planned) return 0;
+    return Math.round((actual - planned) / (1000 * 60 * 60 * 24));
+  }
+
+  function saveExecutionAndComplete() {
+    if (!executionForm || !executionSelected) return;
+    if (!canCompleteVisit()) {
+      alert('必填检查项目未全部完成，无法标记为已完成！');
+      return;
+    }
+    const actualDate = executionForm.actualDate || today;
+    const outOfWindow = isDateOutOfWindow(actualDate, executionSelected);
+    const deviationDays = getDeviationDays(actualDate, executionSelected);
+
+    const next = records.map(item => {
+      if (item.id !== executionSelected.id) return item;
+      let deviationText = item.deviation || '';
+      if (outOfWindow) {
+        const direction = deviationDays > 0 ? '超窗' : '提前';
+        const newDeviation = `实际访视日期${actualDate}，较计划${item.plannedDate || item.scheduledDate}${direction}${Math.abs(deviationDays)}天`;
+        deviationText = deviationText
+          ? `${deviationText}；${newDeviation}`
+          : newDeviation;
+      }
+      const oldTimeline = item.timeline || [];
+      const newTimelineEntries = [
+        { status: '执行中', at: today, by: '研究员' },
+        { status: '已完成', at: today, by: '访视执行完成' },
+      ];
+      if (outOfWindow) {
+        newTimelineEntries.push({ status: '偏差记录', at: today, by: `超窗${Math.abs(deviationDays)}天，自动生成偏差草稿` });
+      }
+      return {
+        ...item,
+        status: '已完成',
+        actualDate,
+        executionItems: executionForm.executionItems,
+        deviation: deviationText,
+        timeline: [...oldTimeline, ...newTimelineEntries],
+      };
+    });
+    persist(next);
+    closeExecutionWorkbench();
+    if (outOfWindow) {
+      alert(`访视已完成！注意：实际日期超出访视窗口 ${Math.abs(deviationDays)} 天，已自动创建偏差记录。`);
+    } else {
+      alert('访视已完成！');
+    }
+  }
+
+  function saveExecutionDraft() {
+    if (!executionForm || !executionSelected) return;
+    const actualDate = executionForm.actualDate || '';
+    const next = records.map(item => {
+      if (item.id !== executionSelected.id) return item;
+      const oldTimeline = item.timeline || [];
+      const hasInProgress = oldTimeline.some(t => t.status === '执行中');
+      const newTimeline = hasInProgress ? oldTimeline : [...oldTimeline, { status: '执行中', at: today, by: '研究员' }];
+      let newStatus = item.status;
+      if (item.status === '待访视' || item.status === '窗口内' || item.status === '已超窗') {
+        newStatus = item.status;
+      }
+      return {
+        ...item,
+        executionItems: executionForm.executionItems,
+        actualDate,
+        status: newStatus,
+        timeline: newTimeline,
+      };
+    });
+    persist(next);
+    const updated = next.find(r => r.id === executionSelected.id);
+    if (updated) {
+      setExecutionSelected(updated);
+      setExecutionForm({ ...executionForm, ...updated });
+    }
+    alert('执行记录已保存为草稿。');
+  }
+
+  function toggleItemRequired(itemId) {
+    if (!executionForm) return;
+    const nextItems = executionForm.executionItems.map(item =>
+      item.id === itemId ? { ...item, required: !item.required } : item
+    );
+    setExecutionForm({ ...executionForm, executionItems: nextItems });
+  }
+
+  const executionStats = useMemo(() => {
+    if (!executionForm || !executionForm.executionItems) {
+      return { total: 0, done: 0, pending: 0, skipped: 0, requiredTotal: 0, requiredDone: 0 };
+    }
+    const items = executionForm.executionItems;
+    return {
+      total: items.length,
+      done: items.filter(i => i.status === 'done').length,
+      pending: items.filter(i => i.status === 'pending').length,
+      skipped: items.filter(i => i.status === 'skipped').length,
+      requiredTotal: items.filter(i => i.required).length,
+      requiredDone: items.filter(i => i.required && i.status === 'done').length,
+    };
+  }, [executionForm]);
 
   const batchStats = useMemo(() => {
     const total = batchParsedData.length;
@@ -1417,6 +1627,13 @@ function App() {
           onClick={() => setActiveTab('calendar')}
         >
           <CalendarDays size={16} />访视日历
+        </button>
+        <button
+          type="button"
+          className={'tab-btn ' + (activeTab === 'execution' ? 'active' : '')}
+          onClick={() => setActiveTab('execution')}
+        >
+          <Stethoscope size={16} />访视执行
         </button>
       </div>
 
@@ -2218,6 +2435,280 @@ SUB-102,对照组,2026-06-03,Ⅱ期临床标准访视方案`}</pre>
               </div>
             </div>
           )}
+        </section>
+      ) : activeTab === 'execution' ? (
+        <section className="execution-workspace">
+          <section className="panel execution-list-panel">
+            <div className="panel-title">
+              <ClipboardList size={18} />
+              <h2>待执行访视</h2>
+              <span className="execution-count">{filteredRecords.filter(r => r.status !== '已完成').length}</span>
+            </div>
+            <div className="execution-list">
+              {filteredRecords.filter(r => r.status !== '已完成').length === 0 ? (
+                <p className="empty" style={{ padding: 20, textAlign: 'center' }}>暂无待执行的访视记录。</p>
+              ) : (
+                filteredRecords
+                  .filter(r => r.status !== '已完成')
+                  .sort((a, b) => {
+                    const order = { '已超窗': 0, '窗口内': 1, '待访视': 2 };
+                    return (order[a.status] ?? 9) - (order[b.status] ?? 9);
+                  })
+                  .map(item => {
+                    const doneCount = (item.executionItems || []).filter(i => i.status === 'done').length;
+                    const totalCount = (item.executionItems || []).length;
+                    const progress = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
+                    return (
+                      <article
+                        key={item.id}
+                        className={'execution-card ' + (executionSelected?.id === item.id ? 'selected' : '')}
+                        onClick={() => openExecutionWorkbench(item)}
+                      >
+                        <div className="execution-card-head">
+                          <div>
+                            <h3>{item.subjectNo} · {item.visitName}</h3>
+                            <p>{item.group} · 计划 {item.plannedDate || item.scheduledDate} · ±{item.windowDays}天</p>
+                          </div>
+                          <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                        </div>
+                        <p className="execution-items-preview">检查项目：{item.items || '—'}</p>
+                        <div className="execution-progress">
+                          <div className="progress-bar">
+                            <div className="progress-fill" style={{ width: `${progress}%` }} />
+                          </div>
+                          <span className="progress-text">{doneCount}/{totalCount} 项已完成</span>
+                        </div>
+                        {item.actualDate && (
+                          <p className="execution-actual-date">实际访视：{item.actualDate}</p>
+                        )}
+                      </article>
+                    );
+                  })
+              )}
+            </div>
+          </section>
+
+          <section className="panel execution-detail-panel">
+            {executionForm ? (
+              <div className="execution-detail">
+                <div className="execution-detail-head">
+                  <div>
+                    <h2>{executionForm.subjectNo} · {executionForm.visitName}</h2>
+                    <p>{executionForm.group} · 入组 {executionForm.enrollDate} · 计划访视 {executionForm.plannedDate || executionForm.scheduledDate}</p>
+                  </div>
+                  <button type="button" className="link-btn" onClick={closeExecutionWorkbench}>
+                    <X size={16} />关闭
+                  </button>
+                </div>
+
+                <div className="execution-summary">
+                  <div className="exec-stat">
+                    <span className="exec-stat-label">总检查项</span>
+                    <strong className="exec-stat-value">{executionStats.total}</strong>
+                  </div>
+                  <div className="exec-stat done">
+                    <span className="exec-stat-label">已完成</span>
+                    <strong className="exec-stat-value">{executionStats.done}</strong>
+                  </div>
+                  <div className="exec-stat pending">
+                    <span className="exec-stat-label">待执行</span>
+                    <strong className="exec-stat-value">{executionStats.pending}</strong>
+                  </div>
+                  <div className="exec-stat skipped">
+                    <span className="exec-stat-label">未完成</span>
+                    <strong className="exec-stat-value">{executionStats.skipped}</strong>
+                  </div>
+                  <div className="exec-stat required">
+                    <span className="exec-stat-label">必填项进度</span>
+                    <strong className="exec-stat-value">{executionStats.requiredDone}/{executionStats.requiredTotal}</strong>
+                  </div>
+                </div>
+
+                <div className="execution-sub-tabs">
+                  <button
+                    type="button"
+                    className={'exec-sub-tab ' + (executionTab === 'items' ? 'active' : '')}
+                    onClick={() => setExecutionTab('items')}
+                  >
+                    <CheckCircle2 size={14} />检查项目
+                  </button>
+                  <button
+                    type="button"
+                    className={'exec-sub-tab ' + (executionTab === 'info' ? 'active' : '')}
+                    onClick={() => setExecutionTab('info')}
+                  >
+                    <FileText size={14} />访视信息
+                  </button>
+                  <button
+                    type="button"
+                    className={'exec-sub-tab ' + (executionTab === 'timeline' ? 'active' : '')}
+                    onClick={() => setExecutionTab('timeline')}
+                  >
+                    <Clock size={14} />状态时间线
+                  </button>
+                </div>
+
+                {executionTab === 'items' && (
+                  <div className="execution-items-list">
+                    {executionForm.executionItems.map(item => (
+                      <div key={item.id} className={'exec-item ' + item.status + (item.required ? ' required' : '')}>
+                        <div className="exec-item-head">
+                          <label className="exec-item-checkbox" onClick={e => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={item.status === 'done'}
+                              onChange={() => toggleExecutionItemStatus(item.id)}
+                            />
+                            <span className="checkbox-custom">
+                              {item.status === 'done' && <Check size={14} />}
+                            </span>
+                          </label>
+                          <div className="exec-item-title">
+                            <h4>
+                              {item.name}
+                              {item.required && <span className="required-tag">必填</span>}
+                            </h4>
+                            <span className={'exec-item-status-badge ' + item.status}>
+                              {item.status === 'done' ? '已完成' : item.status === 'skipped' ? '未完成' : '待执行'}
+                            </span>
+                          </div>
+                          <div className="exec-item-actions" onClick={e => e.stopPropagation()}>
+                            <button
+                              type="button"
+                              className={'status-btn ' + (item.status === 'skipped' ? 'active' : '')}
+                              onClick={() => setItemSkipped(item.id)}
+                              title="标记为未完成"
+                            >
+                              <FileX size={14} />未完成
+                            </button>
+                            <button
+                              type="button"
+                              className="link-btn"
+                              onClick={() => toggleItemRequired(item.id)}
+                              title={item.required ? '取消必填' : '设为必填'}
+                            >
+                              {item.required ? '取消必填' : '设为必填'}
+                            </button>
+                          </div>
+                        </div>
+
+                        {item.status === 'done' && (
+                          <div className="exec-item-body">
+                            <label>
+                              <span>执行结果</span>
+                              <textarea
+                                value={item.result}
+                                onChange={e => updateExecutionItem(item.id, 'result', e.target.value)}
+                                placeholder="请记录检查结果..."
+                                rows={2}
+                              />
+                            </label>
+                          </div>
+                        )}
+
+                        {item.status === 'skipped' && (
+                          <div className="exec-item-body skipped-body">
+                            <label>
+                              <span>未完成原因（必填）</span>
+                              <textarea
+                                value={item.reason}
+                                onChange={e => updateExecutionItem(item.id, 'reason', e.target.value)}
+                                placeholder="请说明未完成的原因..."
+                                rows={2}
+                              />
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {executionTab === 'info' && (
+                  <div className="execution-info">
+                    <div className="info-grid">
+                      <label className="wide">
+                        <span>实际访视日期</span>
+                        <input
+                          type="date"
+                          value={executionForm.actualDate || ''}
+                          onChange={e => setExecutionForm({ ...executionForm, actualDate: e.target.value })}
+                        />
+                        {executionForm.actualDate && isDateOutOfWindow(executionForm.actualDate, executionSelected) && (
+                          <div className="warning" style={{ marginTop: 8 }}>
+                            <AlertTriangle size={14} />
+                            <span>实际日期超出访视窗口，完成时将自动创建偏差记录</span>
+                          </div>
+                        )}
+                      </label>
+                      <label className="wide">
+                        <span>检查项目原文</span>
+                        <p className="info-value">{executionForm.items || '—'}</p>
+                      </label>
+                      {executionForm.deviation && (
+                        <label className="wide">
+                          <span>已有偏差记录</span>
+                          <div className="warning" style={{ display: 'block' }}>
+                            <AlertTriangle size={14} /> {executionForm.deviation}
+                          </div>
+                        </label>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {executionTab === 'timeline' && (
+                  <div className="execution-timeline">
+                    <div className="timeline-list">
+                      {(executionForm.timeline || []).map((step, index) => (
+                        <div key={index} className="timeline-item">
+                          <div className="timeline-dot" />
+                          <div className="timeline-content">
+                            <span className="timeline-status">{step.status}</span>
+                            <span className="timeline-time">{step.at}</span>
+                            <span className="timeline-by">{step.by}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="execution-actions">
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={saveExecutionDraft}
+                  >
+                    <Save size={16} />保存草稿
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={saveExecutionAndComplete}
+                    disabled={!canCompleteVisit()}
+                    style={{ marginTop: 0 }}
+                  >
+                    <CheckCircle2 size={16} />
+                    {canCompleteVisit() ? '完成访视' : '必填项未完成'}
+                  </button>
+                </div>
+
+                {!canCompleteVisit() && executionStats.requiredTotal > 0 && (
+                  <p className="hint" style={{ marginTop: 10, color: '#dc2626' }}>
+                    <AlertTriangle size={14} style={{ verticalAlign: -2 }} />
+                    还有 {executionStats.requiredTotal - executionStats.requiredDone} 项必填检查项目未完成，无法标记访视完成。
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="execution-empty">
+                <Stethoscope size={48} />
+                <h3>选择一条访视开始执行</h3>
+                <p>从左侧列表选择一条待执行的访视记录，逐项勾选检查项目并记录结果。</p>
+              </div>
+            )}
+          </section>
         </section>
       ) : (
         <section className="workspace">
