@@ -1,6 +1,17 @@
 import { useMemo, useState, useRef, useCallback } from 'react';
-import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Building2, BarChart3, Edit3, AlertCircle, SearchX, CheckSquare, UserCircle, Clock, Filter, ArrowRight, User, Download, FileArchive, XCircle, Loader2, Table, Archive, FileSpreadsheet, GitCompare, History, ArrowLeftRight, ShieldCheck, Undo2, RefreshCw, BadgeCheck, Ban, GitBranch, ChevronDown, ChevronUp, FileCheck2, ArrowRightLeft, ClipboardCheck } from 'lucide-react';
+import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Building2, BarChart3, Edit3, AlertCircle, SearchX, CheckSquare, UserCircle, Clock, Filter, ArrowRight, User, Download, FileArchive, XCircle, Loader2, Table, Archive, FileSpreadsheet, GitCompare, History, ArrowLeftRight, ShieldCheck, Undo2, RefreshCw, BadgeCheck, Ban, GitBranch, ChevronDown, ChevronUp, FileCheck2, ArrowRightLeft, ClipboardCheck, Wifi, WifiOff, Database, Server } from 'lucide-react';
 import './App.css';
+import './sync/sync.css';
+import {
+  SyncStatusBar,
+  SyncPanel,
+  ConflictPanel,
+  OperationLogPanel,
+  AuditLogPanel,
+  useSyncStatus,
+  useConflicts,
+  useAutoMigrateFromLocalStorage,
+} from './sync';
 
 const appConfig = {
   "id": "hxwl-61309",
@@ -562,6 +573,15 @@ function sleep(ms) {
 }
 
 function App() {
+  useAutoMigrateFromLocalStorage();
+  const syncStatus = useSyncStatus();
+  const { conflicts } = useConflicts();
+
+  const [showSyncPanel, setShowSyncPanel] = useState(false);
+  const [showConflictPanel, setShowConflictPanel] = useState(false);
+  const [showOpLogPanel, setShowOpLogPanel] = useState(false);
+  const [showAuditPanel, setShowAuditPanel] = useState(false);
+
   const [records, setRecords] = useState(loadRecords);
   const [form, setForm] = useState(appConfig.defaultValues);
   const [filters, setFilters] = useState({ query: '', status: '全部' });
@@ -1913,6 +1933,10 @@ function App() {
           <p>{appConfig.subtitle}</p>
         </div>
         <div className="hero-right">
+            <SyncStatusBar
+              onOpenSyncPanel={() => setShowSyncPanel(true)}
+              onOpenConflictPanel={() => setShowConflictPanel(true)}
+            />
             <div className="center-selector">
               <Building2 size={16} />
             <select value={activeCenterId} onChange={(e) => switchCenter(e.target.value)}>
@@ -1980,6 +2004,21 @@ function App() {
         >
           <GitBranch size={16} />版本管理与迁移
           {centerVersions.length > 0 && <span className="tab-badge">{centerVersions.filter(v => v.isCurrent).length}</span>}
+        </button>
+        <div style={{ flex: 1 }} />
+        <button
+          type="button"
+          className="sync-tool-btn"
+          onClick={() => setShowOpLogPanel(true)}
+        >
+          <History size={14} />操作日志
+        </button>
+        <button
+          type="button"
+          className="sync-tool-btn"
+          onClick={() => setShowAuditPanel(true)}
+        >
+          <ShieldCheck size={14} />审计记录
         </button>
       </div>
 
@@ -3692,6 +3731,26 @@ function App() {
           </>
         )}
       </section>
+
+      {!syncStatus.isOnline && (
+        <div className="offline-banner">
+          <WifiOff size={18} />
+          当前处于离线模式，所有操作已保存在本地，恢复网络后将自动同步
+        </div>
+      )}
+
+      {showSyncPanel && (
+        <SyncPanel onClose={() => setShowSyncPanel(false)} />
+      )}
+      {showConflictPanel && (
+        <ConflictPanel onClose={() => setShowConflictPanel(false)} />
+      )}
+      {showOpLogPanel && (
+        <OperationLogPanel onClose={() => setShowOpLogPanel(false)} />
+      )}
+      {showAuditPanel && (
+        <AuditLogPanel onClose={() => setShowAuditPanel(false)} />
+      )}
     </main>
   );
 }
