@@ -392,6 +392,7 @@ textarea { min-height: 76px; resize: vertical; }
 .status-b { background: #ecfeff; color: #0e7490; }
 .status-c { background: #ecfdf3; color: #047857; }
 .status-d { background: #fff1f2; color: #be123c; }
+.status-e { background: #f3f4f6; color: #6b7280; text-decoration: line-through; }
 
 .warning {
   display: inline-flex;
@@ -4471,6 +4472,145 @@ textarea { min-height: 76px; resize: vertical; }
 .audit-type-rollback_migration {
   background: #fee2e2;
   color: #991b1b;
+}
+
+.audit-type-field_change {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.audit-type-record_add {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.audit-type-record_cancel {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.audit-type-rollback_field_restore {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+.audit-type-rollback_remove_added {
+  background: #fce7f3;
+  color: #9d174d;
+}
+
+.audit-type-rollback_restore_cancelled {
+  background: #e0e7ff;
+  color: #3730a3;
+}
+
+.audit-type-rollback_pending_confirm {
+  background: #f3e8ff;
+  color: #6b21a8;
+}
+
+.audit-table-wrap {
+  overflow-x: auto;
+  max-height: calc(100vh - 380px);
+  overflow-y: auto;
+}
+
+.audit-detail {
+  font-size: 13px;
+  color: #1f2937;
+  line-height: 1.5;
+}
+
+.audit-field-change {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 4px 8px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.audit-field-name {
+  font-weight: 600;
+  color: #92400e;
+}
+
+.audit-old-val {
+  color: #dc2626;
+  text-decoration: line-through;
+  padding: 1px 6px;
+  background: #fee2e2;
+  border-radius: 3px;
+}
+
+.audit-arrow {
+  color: #6b7280;
+  font-weight: 600;
+}
+
+.audit-new-val {
+  color: #059669;
+  padding: 1px 6px;
+  background: #d1fae5;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.audit-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.audit-stats span {
+  padding: 2px 6px;
+  background: #f3f4f6;
+  border-radius: 3px;
+}
+
+.audit-source {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.audit-source-text {
+  line-height: 1.4;
+}
+
+.audit-migration-id {
+  margin-top: 4px;
+  color: #9ca3af;
+  font-family: monospace;
+}
+
+.audit-row-field_change td {
+  background: #fffbeb;
+}
+
+.audit-row-record_add td {
+  background: #f0fdf4;
+}
+
+.audit-row-record_cancel td {
+  background: #fef2f2;
+}
+
+.audit-row-rollback_field_restore td {
+  background: #fefce8;
+}
+
+.audit-row-rollback_remove_added td {
+  background: #fdf2f8;
+}
+
+.audit-row-rollback_restore_cancelled td {
+  background: #eef2ff;
 }
 
 .version-list-section {
