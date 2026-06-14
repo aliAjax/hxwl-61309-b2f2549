@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Building2, BarChart3, Edit3, AlertCircle, SearchX, CheckSquare, UserCircle, Clock, Filter, ArrowRight, User } from 'lucide-react';
+import { useMemo, useState, useRef, useCallback } from 'react';
+import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Building2, BarChart3, Edit3, AlertCircle, SearchX, CheckSquare, UserCircle, Clock, Filter, ArrowRight, User, Download, FileArchive, XCircle, Loader2, Table, Archive, FileSpreadsheet } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -338,6 +338,107 @@ function statusClass(status) {
   return ['status-a', 'status-b', 'status-c', 'status-d'][index] || 'status-a';
 }
 
+function escapeCSV(value) {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+
+function rowsToCSV(headers, rows) {
+  const headerLine = headers.map(h => escapeCSV(h.label)).join(',');
+  const bodyLines = rows.map(row =>
+    headers.map(h => escapeCSV(row[h.key])).join(',')
+  );
+  return '\ufeff' + [headerLine, ...bodyLines].join('\r\n');
+}
+
+function downloadBlob(content, filename, type = 'text/csv;charset=utf-8') {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 100);
+}
+
+const EXPORT_CSV_HEADERS = [
+  { key: 'centerName', label: '研究中心' },
+  { key: 'subjectNo', label: '受试者编号' },
+  { key: 'group', label: '试验分组' },
+  { key: 'visitName', label: '访视名称' },
+  { key: 'enrollDate', label: '入组日期' },
+  { key: 'plannedDate', label: '计划访视日期' },
+  { key: 'plannedDays', label: '计划天数(相对入组)' },
+  { key: 'windowDays', label: '窗口天数(±)' },
+  { key: 'actualDate', label: '实际完成日期' },
+  { key: 'items', label: '检查项目' },
+  { key: 'status', label: '访视状态' },
+  { key: 'deviation', label: '偏差记录(简要)' },
+  { key: 'hasLinkedDeviation', label: '是否关联偏差单' },
+  { key: 'deviationSeverity', label: '关联偏差严重程度' },
+  { key: 'deviationStatus', label: '关联偏差状态' },
+  { key: 'timeline', label: '状态时间线' },
+  { key: 'createdAt', label: '记录创建时间' },
+];
+
+const EXPORT_DEVIATION_HEADERS = [
+  { key: 'centerName', label: '研究中心' },
+  { key: 'subjectNo', label: '受试者编号' },
+  { key: 'visitName', label: '访视名称' },
+  { key: 'group', label: '试验分组' },
+  { key: 'severity', label: '严重程度' },
+  { key: 'type', label: '偏差类型' },
+  { key: 'status', label: '处理状态' },
+  { key: 'title', label: '偏差标题' },
+  { key: 'description', label: '详细描述' },
+  { key: 'reportedBy', label: '报告人' },
+  { key: 'reportedAt', label: '报告日期' },
+  { key: 'resolution', label: '处理措施/关闭说明' },
+  { key: 'closedAt', label: '关闭日期' },
+  { key: 'timeline', label: '偏差时间线' },
+];
+
+const EXPORT_TIMELINE_HEADERS = [
+  { key: 'centerName', label: '研究中心' },
+  { key: 'subjectNo', label: '受试者编号' },
+  { key: 'visitName', label: '访视名称' },
+  { key: 'recordType', label: '记录类型' },
+  { key: 'eventStatus', label: '事件/状态' },
+  { key: 'eventAt', label: '发生日期' },
+  { key: 'eventBy', label: '操作人' },
+  { key: 'eventNote', label: '备注' },
+];
+
+function formatExportDate(d) {
+  if (!d) return '';
+  const dt = new Date(d);
+  if (isNaN(dt.getTime())) return '';
+  return dt.toISOString().slice(0, 10);
+}
+
+function getActualDateFromTimeline(timeline) {
+  if (!timeline || !Array.isArray(timeline)) return '';
+  const completed = timeline.find(t => t.status === '已完成');
+  return completed ? completed.at : '';
+}
+
+function severityLabel(key) {
+  return DEVIATION_SEVERITIES.find(s => s.key === key)?.label || key;
+}
+function devStatusLabel(key) {
+  return DEVIATION_STATUSES.find(s => s.key === key)?.label || key;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function App() {
   const [records, setRecords] = useState(loadRecords);
   const [form, setForm] = useState(appConfig.defaultValues);
@@ -365,6 +466,18 @@ function App() {
   });
   const [devFilters, setDevFilters] = useState({ query: '', severity: '全部', type: '全部' });
   const [selectedDev, setSelectedDev] = useState(null);
+
+  const [exportFilters, setExportFilters] = useState({
+    startDate: '',
+    endDate: '',
+    group: '全部',
+    status: '全部',
+    subjectQuery: '',
+  });
+  const [exportPreview, setExportPreview] = useState(null);
+  const [exportProgress, setExportProgress] = useState({ active: false, current: 0, total: 0, phase: '', cancelled: false });
+  const exportCancelledRef = useRef(false);
+  const [exportHistory, setExportHistory] = useState([]);
 
   function switchCenter(centerId) {
     setActiveCenterId(centerId);
@@ -751,6 +864,252 @@ function App() {
     return cols;
   }, [filteredDeviations]);
 
+  const allGroups = useMemo(() => {
+    const set = new Set();
+    records.forEach(r => r.group && set.add(r.group));
+    return Array.from(set);
+  }, [records]);
+
+  const allSubjects = useMemo(() => {
+    const set = new Set();
+    records.forEach(r => r.subjectNo && set.add(r.subjectNo));
+    return Array.from(set).sort();
+  }, [records]);
+
+  const exportScopeRecords = useMemo(() => {
+    const ef = exportFilters;
+    const scope = activeCenterId === '__hq__' ? records : records.filter(r => r.centerId === activeCenterId);
+    return scope.filter(r => {
+      if (ef.group !== '全部' && r.group !== ef.group) return false;
+      if (ef.status !== '全部' && r.status !== ef.status) return false;
+      if (ef.subjectQuery && !String(r.subjectNo || '').includes(ef.subjectQuery)) return false;
+      const refDate = r.plannedDate || r.enrollDate || r.createdAt?.slice(0, 10);
+      if (ef.startDate && refDate && refDate < ef.startDate) return false;
+      if (ef.endDate && refDate && refDate > ef.endDate) return false;
+      return true;
+    });
+  }, [records, exportFilters, activeCenterId]);
+
+  const exportScopeDeviations = useMemo(() => {
+    const ef = exportFilters;
+    const scope = activeCenterId === '__hq__' ? deviations : deviations.filter(d => d.centerId === activeCenterId);
+    const scopeSubjects = new Set(exportScopeRecords.map(r => r.subjectNo));
+    return scope.filter(d => {
+      if (ef.group !== '全部' && d.group !== ef.group) return false;
+      if (ef.subjectQuery && !String(d.subjectNo || '').includes(ef.subjectQuery)) return false;
+      if (scopeSubjects.size > 0 && !scopeSubjects.has(d.subjectNo)) return false;
+      if (ef.startDate && d.reportedAt && d.reportedAt < ef.startDate) return false;
+      if (ef.endDate && d.reportedAt && d.reportedAt > ef.endDate) return false;
+      return true;
+    });
+  }, [deviations, exportFilters, exportScopeRecords, activeCenterId]);
+
+  const getMissingFields = useCallback((rec) => {
+    const missing = [];
+    if (!rec.subjectNo) missing.push('受试者编号');
+    if (!rec.group) missing.push('试验分组');
+    if (!rec.enrollDate) missing.push('入组日期');
+    if (!rec.plannedDate) missing.push('计划访视日期');
+    if (!rec.items || !String(rec.items).trim()) missing.push('检查项目');
+    if (rec.status === '已完成' && !getActualDateFromTimeline(rec.timeline)) missing.push('实际完成日期');
+    return missing;
+  }, []);
+
+  function runExportPreview() {
+    if (exportScopeRecords.length === 0) {
+      alert('当前筛选条件下没有可导出的数据');
+      return;
+    }
+    const previewRows = exportScopeRecords.slice(0, 20).map(r => {
+      const center = centers.find(c => c.id === r.centerId);
+      const linkedDev = deviations.find(d => d.sourceRecordId === r.id);
+      return {
+        centerName: center?.name || '未知',
+        subjectNo: r.subjectNo,
+        group: r.group,
+        visitName: r.visitName,
+        enrollDate: r.enrollDate,
+        plannedDate: r.plannedDate,
+        plannedDays: r.plannedDays,
+        windowDays: r.windowDays,
+        actualDate: getActualDateFromTimeline(r.timeline),
+        items: r.items,
+        status: r.status,
+        deviation: r.deviation,
+        hasLinkedDeviation: linkedDev ? '是' : '否',
+        deviationSeverity: linkedDev ? severityLabel(linkedDev.severity) : '',
+        deviationStatus: linkedDev ? devStatusLabel(linkedDev.status) : '',
+        timeline: (r.timeline || []).map(t => `${t.at} ${t.status}(${t.by})`).join(' | '),
+        createdAt: formatExportDate(r.createdAt),
+      };
+    });
+
+    const missingInfo = exportScopeRecords
+      .map(r => ({ rec: r, missing: getMissingFields(r) }))
+      .filter(x => x.missing.length > 0)
+      .slice(0, 10)
+      .map(x => ({ subjectNo: x.rec.subjectNo, visitName: x.rec.visitName, missing: x.missing.join('、') }));
+
+    setExportPreview({
+      rows: previewRows,
+      totalCount: exportScopeRecords.length,
+      deviationCount: exportScopeDeviations.length,
+      missingInfo,
+      totalMissing: exportScopeRecords.filter(r => getMissingFields(r).length > 0).length,
+      generatedAt: new Date().toLocaleString('zh-CN'),
+    });
+  }
+
+  async function runExport() {
+    if (exportScopeRecords.length === 0) {
+      alert('当前筛选条件下没有可导出的数据');
+      return;
+    }
+    exportCancelledRef.current = false;
+    const totalSteps = exportScopeRecords.length + exportScopeDeviations.length + 3;
+    setExportProgress({ active: true, current: 0, total: totalSteps, phase: '准备导出数据...', cancelled: false });
+    await sleep(30);
+
+    try {
+      const visitRows = [];
+      const devRows = [];
+      const timelineRows = [];
+      const ts = new Date();
+      const stamp = `${ts.getFullYear()}${String(ts.getMonth() + 1).padStart(2, '0')}${String(ts.getDate()).padStart(2, '0')}_${String(ts.getHours()).padStart(2, '0')}${String(ts.getMinutes()).padStart(2, '0')}`;
+
+      for (let i = 0; i < exportScopeRecords.length; i++) {
+        if (exportCancelledRef.current) throw new Error('CANCELLED');
+        const r = exportScopeRecords[i];
+        const center = centers.find(c => c.id === r.centerId);
+        const linkedDev = deviations.find(d => d.sourceRecordId === r.id);
+        const actualDate = getActualDateFromTimeline(r.timeline);
+        visitRows.push({
+          centerName: center?.name || '未知',
+          subjectNo: r.subjectNo,
+          group: r.group,
+          visitName: r.visitName,
+          enrollDate: r.enrollDate,
+          plannedDate: r.plannedDate,
+          plannedDays: r.plannedDays,
+          windowDays: r.windowDays,
+          actualDate,
+          items: r.items,
+          status: r.status,
+          deviation: r.deviation,
+          hasLinkedDeviation: linkedDev ? '是' : '否',
+          deviationSeverity: linkedDev ? severityLabel(linkedDev.severity) : '',
+          deviationStatus: linkedDev ? devStatusLabel(linkedDev.status) : '',
+          timeline: (r.timeline || []).map(t => `${t.at} ${t.status}(${t.by})${t.note ? ': ' + t.note : ''}`).join(' | '),
+          createdAt: formatExportDate(r.createdAt),
+        });
+        (r.timeline || []).forEach(t => {
+          timelineRows.push({
+            centerName: center?.name || '未知',
+            subjectNo: r.subjectNo,
+            visitName: r.visitName,
+            recordType: '访视记录',
+            eventStatus: t.status,
+            eventAt: t.at,
+            eventBy: t.by,
+            eventNote: t.note || '',
+          });
+        });
+        if ((i + 1) % 50 === 0) {
+          setExportProgress(p => ({ ...p, current: i + 1, phase: `处理访视记录 ${i + 1} / ${exportScopeRecords.length}` }));
+          await sleep(10);
+        }
+      }
+      setExportProgress(p => ({ ...p, current: exportScopeRecords.length, phase: '处理偏差记录...' }));
+
+      for (let j = 0; j < exportScopeDeviations.length; j++) {
+        if (exportCancelledRef.current) throw new Error('CANCELLED');
+        const d = exportScopeDeviations[j];
+        const center = centers.find(c => c.id === d.centerId);
+        devRows.push({
+          centerName: center?.name || '未知',
+          subjectNo: d.subjectNo,
+          visitName: d.visitName,
+          group: d.group,
+          severity: severityLabel(d.severity),
+          type: d.type,
+          status: devStatusLabel(d.status),
+          title: d.title,
+          description: d.description,
+          reportedBy: d.reportedBy,
+          reportedAt: d.reportedAt,
+          resolution: d.resolution,
+          closedAt: d.closedAt,
+          timeline: (d.timeline || []).map(t => `${t.at} ${t.status}(${t.by})${t.note ? ': ' + t.note : ''}`).join(' | '),
+        });
+        (d.timeline || []).forEach(t => {
+          timelineRows.push({
+            centerName: center?.name || '未知',
+            subjectNo: d.subjectNo,
+            visitName: d.visitName,
+            recordType: '偏差记录',
+            eventStatus: t.status,
+            eventAt: t.at,
+            eventBy: t.by,
+            eventNote: t.note || '',
+          });
+        });
+        if ((j + 1) % 50 === 0) {
+          setExportProgress(p => ({ ...p, current: exportScopeRecords.length + j + 1, phase: `处理偏差记录 ${j + 1} / ${exportScopeDeviations.length}` }));
+          await sleep(10);
+        }
+      }
+
+      setExportProgress(p => ({ ...p, phase: '生成 CSV 文件...' }));
+      await sleep(30);
+      if (exportCancelledRef.current) throw new Error('CANCELLED');
+
+      const visitCSV = rowsToCSV(EXPORT_CSV_HEADERS, visitRows);
+      setExportProgress(p => ({ ...p, current: p.current + 1, phase: '生成偏差 CSV...' }));
+      await sleep(20);
+      if (exportCancelledRef.current) throw new Error('CANCELLED');
+
+      const devCSV = rowsToCSV(EXPORT_DEVIATION_HEADERS, devRows);
+      setExportProgress(p => ({ ...p, current: p.current + 1, phase: '生成时间线 CSV...' }));
+      await sleep(20);
+      if (exportCancelledRef.current) throw new Error('CANCELLED');
+
+      const tlCSV = rowsToCSV(EXPORT_TIMELINE_HEADERS, timelineRows);
+      setExportProgress(p => ({ ...p, current: p.current + 1, phase: '下载归档包...' }));
+      await sleep(30);
+
+      const scopeLabel = activeCenterId === '__hq__' ? '总部汇总' : (centers.find(c => c.id === activeCenterId)?.code || 'center');
+      downloadBlob(visitCSV, `访视数据_${scopeLabel}_${stamp}.csv`);
+      await sleep(200);
+      downloadBlob(devCSV, `偏差记录_${scopeLabel}_${stamp}.csv`);
+      await sleep(200);
+      downloadBlob(tlCSV, `状态时间线_${scopeLabel}_${stamp}.csv`);
+
+      setExportHistory(h => [
+        { id: uid(), stamp, scope: scopeLabel, visitCount: visitRows.length, devCount: devRows.length, at: new Date().toLocaleString('zh-CN') },
+        ...h,
+      ].slice(0, 10));
+
+      setExportProgress({ active: false, current: 0, total: 0, phase: '', cancelled: false });
+    } catch (err) {
+      if (err.message === 'CANCELLED') {
+        setExportProgress({ active: false, current: 0, total: 0, phase: '', cancelled: true });
+      } else {
+        console.error(err);
+        alert('导出失败：' + err.message);
+        setExportProgress({ active: false, current: 0, total: 0, phase: '', cancelled: false });
+      }
+    }
+  }
+
+  function cancelExport() {
+    exportCancelledRef.current = true;
+  }
+
+  function resetExportFilters() {
+    setExportFilters({ startDate: '', endDate: '', group: '全部', status: '全部', subjectQuery: '' });
+    setExportPreview(null);
+  }
+
   return (
     <main className="shell" style={{ '--accent': appConfig.accent }}>
       <section className="hero">
@@ -812,6 +1171,13 @@ function App() {
           onClick={() => setActiveTab('center')}
         >
           <Building2 size={16} />中心管理
+        </button>
+        <button
+          type="button"
+          className={'tab-btn ' + (activeTab === 'export' ? 'active' : '')}
+          onClick={() => { setActiveTab('export'); setSelected(null); setSelectedDev(null); }}
+        >
+          <FileArchive size={16} />数据导出归档
         </button>
       </div>
 
@@ -1577,6 +1943,249 @@ function App() {
                   </article>
                 );
               })}
+            </div>
+          </section>
+        </section>
+      ) : activeTab === 'export' ? (
+        <section className="export-workspace">
+          <section className="panel export-filter-panel">
+            <div className="panel-title">
+              <Filter size={18} />
+              <h2>导出筛选条件</h2>
+              <button type="button" className="link-btn" onClick={resetExportFilters} style={{ marginLeft: 'auto' }}>
+                <RotateCcw size={14} />重置
+              </button>
+            </div>
+
+            <div className="export-scope-hint">
+              当前数据范围：<strong>{activeCenterId === '__hq__' ? '📊 总部汇总（全部中心）' : centerName}</strong>
+            </div>
+
+            <div className="form-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+              <label>
+                <span>起始日期（计划/入组日）</span>
+                <input
+                  type="date"
+                  value={exportFilters.startDate}
+                  onChange={(e) => setExportFilters({ ...exportFilters, startDate: e.target.value })}
+                />
+              </label>
+              <label>
+                <span>截止日期（计划/入组日）</span>
+                <input
+                  type="date"
+                  value={exportFilters.endDate}
+                  onChange={(e) => setExportFilters({ ...exportFilters, endDate: e.target.value })}
+                />
+              </label>
+              <label>
+                <span>试验分组</span>
+                <select
+                  value={exportFilters.group}
+                  onChange={(e) => setExportFilters({ ...exportFilters, group: e.target.value })}
+                >
+                  <option value="全部">全部分组</option>
+                  {allGroups.map(g => <option key={g} value={g}>{g}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>访视状态</span>
+                <select
+                  value={exportFilters.status}
+                  onChange={(e) => setExportFilters({ ...exportFilters, status: e.target.value })}
+                >
+                  <option value="全部">全部状态</option>
+                  {appConfig.statuses.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </label>
+              <label className="wide">
+                <span>受试者编号搜索</span>
+                <input
+                  type="text"
+                  value={exportFilters.subjectQuery}
+                  onChange={(e) => setExportFilters({ ...exportFilters, subjectQuery: e.target.value })}
+                  placeholder="输入受试者编号关键词，例如 SUB-001"
+                />
+              </label>
+            </div>
+
+            <div className="export-stats-row">
+              <div className="export-stat-item">
+                <strong>{exportScopeRecords.length}</strong>
+                <span>条访视记录</span>
+              </div>
+              <div className="export-stat-item">
+                <strong>{exportScopeDeviations.length}</strong>
+                <span>条偏差记录</span>
+              </div>
+              <div className="export-stat-item">
+                <strong>{new Set(exportScopeRecords.map(r => r.subjectNo)).size}</strong>
+                <span>位受试者</span>
+              </div>
+            </div>
+
+            <div className="export-action-row">
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={runExportPreview}
+                disabled={exportProgress.active || exportScopeRecords.length === 0}
+              >
+                <Eye size={16} />预览数据
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={runExport}
+                disabled={exportProgress.active || exportScopeRecords.length === 0}
+                style={{ marginTop: 14 }}
+              >
+                <Download size={18} />
+                导出 CSV 归档包（访视数据 + 偏差记录 + 时间线）
+              </button>
+            </div>
+
+            {exportProgress.cancelled && (
+              <div className="export-cancelled-hint">
+                <XCircle size={16} />导出已取消
+              </div>
+            )}
+
+            {exportProgress.active && (
+              <div className="export-progress-panel">
+                <div className="export-progress-head">
+                  <Loader2 size={18} className="spin" />
+                  <span>{exportProgress.phase}</span>
+                  <button type="button" className="export-cancel-btn" onClick={cancelExport}>
+                    <XCircle size={14} />取消
+                  </button>
+                </div>
+                <div className="export-progress-bar">
+                  <div
+                    className="export-progress-fill"
+                    style={{ width: `${exportProgress.total > 0 ? Math.min(100, (exportProgress.current / exportProgress.total) * 100) : 0}%` }}
+                  />
+                </div>
+                <div className="export-progress-text">
+                  {exportProgress.current} / {exportProgress.total} （{exportProgress.total > 0 ? Math.round((exportProgress.current / exportProgress.total) * 100) : 0}%）
+                </div>
+              </div>
+            )}
+
+            {exportPreview && !exportProgress.active && (
+              <div className="export-preview-panel">
+                <div className="panel-title" style={{ marginTop: 10 }}>
+                  <Table size={16} />
+                  <h3>数据预览（前 {Math.min(20, exportPreview.rows.length)} 条 / 共 {exportPreview.totalCount} 条）</h3>
+                  <span style={{ marginLeft: 'auto', fontSize: 12, color: '#6b7280' }}>生成于 {exportPreview.generatedAt}</span>
+                </div>
+
+                {exportPreview.totalMissing > 0 && (
+                  <div className="export-missing-alert">
+                    <AlertTriangle size={18} />
+                    <div>
+                      <strong>检测到 {exportPreview.totalMissing} 条记录存在缺失字段</strong>
+                      <p>以下记录缺少关键数据，建议在导出前补录（最多展示 10 条）：</p>
+                      <ul>
+                        {exportPreview.missingInfo.map((m, i) => (
+                          <li key={i}>
+                            <strong>{m.subjectNo || '未命名'} {m.visitName || ''}</strong> — 缺失：{m.missing}
+                          </li>
+                        ))}
+                        {exportPreview.totalMissing > exportPreview.missingInfo.length && (
+                          <li style={{ color: '#6b7280' }}>
+                            ... 还有 {exportPreview.totalMissing - exportPreview.missingInfo.length} 条记录存在缺失字段
+                          </li>
+                        )}
+                      </ul>
+                    </div>
+                  </div>
+                )}
+
+                <div className="export-preview-summary">
+                  <span><FileSpreadsheet size={14} /> 访视数据：{exportPreview.totalCount} 条</span>
+                  <span><AlertCircle size={14} /> 偏差记录：{exportPreview.deviationCount} 条</span>
+                </div>
+
+                <div className="export-preview-table-wrap">
+                  <table className="export-preview-table">
+                    <thead>
+                      <tr>
+                        <th>受试者</th>
+                        <th>分组</th>
+                        <th>访视</th>
+                        <th>计划日期</th>
+                        <th>实际日期</th>
+                        <th>状态</th>
+                        <th>检查项目</th>
+                        <th>关联偏差</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {exportPreview.rows.map((row, i) => (
+                        <tr key={i}>
+                          <td>{row.subjectNo}</td>
+                          <td>{row.group}</td>
+                          <td>{row.visitName}</td>
+                          <td>{row.plannedDate}</td>
+                          <td>{row.actualDate || '-'}</td>
+                          <td>{row.status}</td>
+                          <td className="export-td-truncate">{row.items}</td>
+                          <td>{row.hasLinkedDeviation === '是' ? `${row.deviationSeverity || ''}·${row.deviationStatus || ''}` : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="export-package-hint">
+                  <Archive size={16} />
+                  <div>
+                    <strong>归档包内容说明：</strong>
+                    <ul>
+                      <li><code>访视数据_*.csv</code> — 包含研究中心、受试者、分组、访视名称、入组日期、计划日期、窗口、实际日期、检查项目、访视状态、偏差记录、状态时间线等 17 个字段</li>
+                      <li><code>偏差记录_*.csv</code> — 包含严重程度、偏差类型、处理状态、标题、描述、报告信息、处理措施等 14 个字段</li>
+                      <li><code>状态时间线_*.csv</code> — 所有访视和偏差的完整状态流转记录，便于审计追踪</li>
+                    </ul>
+                    <p style={{ marginTop: 6, fontSize: 12, color: '#6b7280' }}>
+                      💡 所有 CSV 文件均使用 UTF-8 with BOM 编码，确保在 Excel 中打开中文不乱码。
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="panel export-history-panel">
+            <div className="panel-title">
+              <FileArchive size={18} />
+              <h2>导出历史（最近 10 次）</h2>
+            </div>
+            {exportHistory.length === 0 ? (
+              <p className="empty" style={{ textAlign: 'center', padding: 20 }}>暂无导出记录，配置筛选条件后点击"导出 CSV 归档包"即可开始。</p>
+            ) : (
+              <div className="export-history-list">
+                {exportHistory.map(h => (
+                  <div className="export-history-item" key={h.id}>
+                    <div className="export-history-main">
+                      <strong>#{h.stamp}</strong>
+                      <span>范围：{h.scope}</span>
+                      <span>访视 {h.visitCount} 条 · 偏差 {h.devCount} 条</span>
+                    </div>
+                    <span className="export-history-time">{h.at}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="export-tips-card">
+              <h4><AlertCircle size={16} />使用提示</h4>
+              <ul>
+                <li>大批量数据（超过 500 条）导出时会显示进度条，可随时点击"取消"中止任务</li>
+                <li>导出前建议先点击"预览数据"，查看缺失字段提示，确保数据完整</li>
+                <li>CSV 文件自带 UTF-8 BOM 标记，在 Excel、WPS 中直接打开不会乱码</li>
+                <li>如需按中心分别导出，请在顶部切换到具体中心后再执行导出</li>
+              </ul>
             </div>
           </section>
         </section>
