@@ -18,7 +18,8 @@ const appConfig = {
     "待访视",
     "窗口内",
     "已完成",
-    "已超窗"
+    "已超窗",
+    "已取消"
   ],
   "primaryStatus": "待访视",
   "fields": [
@@ -1339,26 +1340,73 @@ function App() {
     if (!migrationPreview || !migrationForm.versionId) return;
     const ver = versions.find(v => v.id === migrationForm.versionId);
     if (!ver) return;
-    const snapshot = [];
+    const prevVersion = migrationPreview.prevVersion;
+    const snapshot = {
+      updatedRecords: [],
+      deletedRecordIds: [],
+      addedRecordIds: [],
+      fullRecordSnapshots: [],
+    };
     let changedCount = 0;
-    const nextRecords = records.map(r => {
-      if (r.centerId !== activeCenterId || r.status === '已完成') return r;
+    let addedCount = 0;
+    let deletedCount = 0;
+
+    const subjectRecordsMap = {};
+    records.forEach(r => {
+      if (r.centerId !== activeCenterId) return;
+      const key = r.subjectNo;
+      if (!subjectRecordsMap[key]) subjectRecordsMap[key] = [];
+      subjectRecordsMap[key].push(r);
+    });
+
+    let nextRecords = records.map(r => {
+      if (r.centerId !== activeCenterId) return r;
+      if (r.status === '已完成') return r;
       const key = `${r.subjectNo}__${r.visitName}`;
       const strategy = migrationForm.subjectStrategies[key];
-      if (!strategy || strategy === 'keep') return r;
+
       if (strategy === 'manual') {
-        return { ...r, migrationStatus: 'pending_confirm', migrationVersion: ver.version };
+        snapshot.fullRecordSnapshots.push({ ...r });
+        changedCount++;
+        return {
+          ...r,
+          migrationStatus: 'pending_confirm',
+          migrationVersion: ver.version,
+          migrationId: migrationForm.versionId,
+        };
       }
+
+      if (!strategy || strategy === 'keep') return r;
+
       if (strategy === 'migrate') {
+        const diff = migrationPreview.diffs.find(d => d.visitName === r.visitName);
+        if (diff && diff.type === 'removed') {
+          snapshot.fullRecordSnapshots.push({ ...r });
+          snapshot.deletedRecordIds.push(r.id);
+          deletedCount++;
+          changedCount++;
+          return {
+            ...r,
+            migrationStatus: 'marked_removed',
+            migrationVersion: ver.version,
+            migrationId: migrationForm.versionId,
+            _migrationAction: 'delete',
+          };
+        }
+
         const newVisit = ver.visits.find(v => v.visitName === r.visitName);
         if (!newVisit) return r;
+
         const oldPlannedDate = r.plannedDate;
         const newPlannedDate = addDays(r.enrollDate, newVisit.plannedDays);
         const newStatus = computeVisitStatus(newPlannedDate, newVisit.windowDays, null);
-        snapshot.push({
+
+        snapshot.fullRecordSnapshots.push({ ...r });
+        snapshot.updatedRecords.push({
           recordId: r.id,
           subjectNo: r.subjectNo,
           visitName: r.visitName,
+          action: 'update',
           oldPlannedDays: r.plannedDays,
           newPlannedDays: Number(newVisit.plannedDays),
           oldWindowDays: r.windowDays,
@@ -1369,6 +1417,13 @@ function App() {
           newPlannedDate,
           oldStatus: r.status,
           newStatus,
+          fieldChanges: [
+            ...(Number(r.plannedDays) !== Number(newVisit.plannedDays) ? [{ field: 'plannedDays', label: '计划天数', old: r.plannedDays, new: Number(newVisit.plannedDays) }] : []),
+            ...(String(r.windowDays) !== String(newVisit.windowDays ?? 0) ? [{ field: 'windowDays', label: '窗口天数', old: r.windowDays, new: String(newVisit.windowDays ?? 0) }] : []),
+            ...((r.items || '') !== (newVisit.items || '') ? [{ field: 'items', label: '检查项目', old: r.items || '', new: newVisit.items || '' }] : []),
+            ...(oldPlannedDate !== newPlannedDate ? [{ field: 'plannedDate', label: '计划日期', old: oldPlannedDate, new: newPlannedDate }] : []),
+            ...(r.status !== newStatus ? [{ field: 'status', label: '访视状态', old: r.status, new: newStatus }] : []),
+          ],
         });
         changedCount++;
         return {
@@ -1380,87 +1435,317 @@ function App() {
           status: newStatus,
           migrationVersion: ver.version,
           migrationStatus: 'migrated',
+          migrationId: migrationForm.versionId,
+          _migrationAction: 'update',
           timeline: [...(r.timeline || []), {
             status: `版本迁移 ${ver.version}`,
             at: today,
             by: '版本管理',
             note: `计划天数${r.plannedDays}→${newVisit.plannedDays}, 窗口${r.windowDays}→${newVisit.windowDays ?? 0}`,
+            source: `方案版本变更: ${prevVersion?.version || 'unknown'} → ${ver.version}`,
           }],
         };
       }
       return r;
     });
+
+    const toAddRecords = [];
+    if (prevVersion) {
+      const addedDiffs = migrationPreview.diffs.filter(d => d.type === 'added');
+      for (const diff of addedDiffs) {
+        const newVisit = diff.new;
+        if (!newVisit) continue;
+        for (const subj of migrationPreview.subjects) {
+          const key = `${subj.subjectNo}__${diff.visitName}`;
+          const strategy = migrationForm.subjectStrategies[key];
+          if (!strategy || strategy === 'keep') continue;
+          const subjRecs = subjectRecordsMap[subj.subjectNo] || [];
+          if (subjRecs.some(r => r.visitName === diff.visitName)) continue;
+
+          const enrollDate = subjRecs[0]?.enrollDate || subj.enrollDate;
+          const group = subjRecs[0]?.group || subj.group;
+          const newPlannedDate = addDays(enrollDate, newVisit.plannedDays);
+          const newStatus = computeVisitStatus(newPlannedDate, newVisit.windowDays, null);
+          const newId = uid();
+
+          snapshot.addedRecordIds.push(newId);
+          const newRecord = {
+            id: newId,
+            centerId: activeCenterId,
+            subjectNo: subj.subjectNo,
+            group: group,
+            enrollDate: enrollDate,
+            visitName: newVisit.visitName,
+            plannedDays: Number(newVisit.plannedDays),
+            windowDays: String(newVisit.windowDays ?? 0),
+            items: newVisit.items || '',
+            plannedDate: newPlannedDate,
+            deviation: '',
+            status: strategy === 'manual' ? newStatus : newStatus,
+            migrationVersion: ver.version,
+            migrationStatus: strategy === 'manual' ? 'pending_confirm' : 'migrated',
+            migrationId: migrationForm.versionId,
+            _migrationAction: 'add',
+            createdAt: new Date().toISOString(),
+            timeline: [{
+              status: strategy === 'manual' ? `待人工确认 ${ver.version}` : `版本迁移新增 ${ver.version}`,
+              at: today,
+              by: '版本管理',
+              note: `新增访视节点 D${newVisit.plannedDays} ±${newVisit.windowDays ?? 0}天`,
+              source: `方案版本新增: ${prevVersion?.version || 'unknown'} → ${ver.version}`,
+            }],
+          };
+          toAddRecords.push(newRecord);
+          changedCount++;
+          addedCount++;
+        }
+      }
+    }
+
+    nextRecords = [...toAddRecords, ...nextRecords];
+
     const migrationId = uid();
     const migrationRecord = {
       id: migrationId,
       versionId: ver.id,
       version: ver.version,
+      prevVersion: prevVersion?.version,
       templateName: ver.templateName,
       centerId: activeCenterId,
       executedAt: today,
       executedBy: '操作员',
       changedCount,
+      addedCount,
+      deletedCount,
       snapshot,
       globalStrategy: migrationForm.globalStrategy,
+      subjectStrategies: { ...migrationForm.subjectStrategies },
     };
+
     const nextVersions = versions.map(v => ({
       ...v,
+      migrations: [...(v.migrations || []), migrationRecord],
       lastMigration: v.id === ver.id ? migrationId : v.lastMigration,
     }));
+
     persist(nextRecords);
     persistVersions(nextVersions);
+
+    snapshot.updatedRecords.forEach(upd => {
+      upd.fieldChanges.forEach(fc => {
+        addAuditEntry({
+          action: 'field_change',
+          target: upd.recordId,
+          migrationId: migrationId,
+          detail: `[${ver.version}] ${upd.subjectNo} ${upd.visitName} ${fc.label}: ${fc.old} → ${fc.new}`,
+          operator: '版本管理',
+          fieldName: fc.field,
+          oldValue: fc.old,
+          newValue: fc.new,
+          source: `方案版本 ${prevVersion?.version || 'unknown'} → ${ver.version}`,
+        });
+      });
+    });
+    snapshot.addedRecordIds.forEach(rid => {
+      const rec = nextRecords.find(r => r.id === rid);
+      if (rec) {
+        addAuditEntry({
+          action: 'record_add',
+          target: rid,
+          migrationId: migrationId,
+          detail: `[${ver.version}] 新增访视 ${rec.subjectNo} ${rec.visitName} D${rec.plannedDays} ±${rec.windowDays}天`,
+          operator: '版本管理',
+          source: `方案版本新增访视节点`,
+        });
+      }
+    });
+    snapshot.deletedRecordIds.forEach(rid => {
+      const snap = snapshot.fullRecordSnapshots.find(s => s.id === rid);
+      addAuditEntry({
+        action: 'record_mark_delete',
+        target: rid,
+        migrationId: migrationId,
+        detail: `[${ver.version}] 标记待删除 ${snap?.subjectNo || '?'} ${snap?.visitName || '?'}`,
+        operator: '版本管理',
+        source: `方案版本删除访视节点`,
+      });
+    });
+
     addAuditEntry({
       action: 'execute_migration',
       target: migrationId,
-      detail: `执行版本迁移 ${ver.templateName} ${ver.version}, 影响${changedCount}条访视记录`,
+      detail: `执行版本迁移 ${ver.templateName} ${ver.version}, 更新${snapshot.updatedRecords.length}条, 新增${addedCount}条, 删除${deletedCount}条, 合计${changedCount}条`,
       operator: '操作员',
-      snapshotCount: snapshot.length,
+      snapshotCount: snapshot.fullRecordSnapshots.length + addedCount,
+      stats: {
+        updated: snapshot.updatedRecords.length,
+        added: addedCount,
+        deleted: deletedCount,
+      },
     });
+
     setMigrationStep('done');
     return migrationRecord;
   }
 
   function rollbackMigration(migrationId) {
-    const audit = audits.find(a => a.target === migrationId && a.action === 'execute_migration');
-    if (!audit) return;
-    if (!confirm('确认回滚此迁移操作？将恢复迁移前的访视计划数据。')) return;
+    if (!confirm('确认回滚此迁移操作？将完整恢复迁移前的访视计划数据（含已删除记录、撤销新增记录、还原已更新字段）。')) return;
+
     const version = versions.find(v => v.lastMigration === migrationId);
-    if (!version) return;
+    if (!version) {
+      alert('未找到对应迁移的版本信息');
+      return;
+    }
+
+    const migrationRecord = (version.migrations || []).find(m => m.id === migrationId);
+    if (!migrationRecord) {
+      alert('未找到迁移记录快照，无法精确回滚');
+      return;
+    }
+
+    const { snapshot } = migrationRecord;
+    if (!snapshot) {
+      alert('迁移快照数据缺失');
+      return;
+    }
+
     let restoredCount = 0;
-    const nextRecords = records.map(r => {
-      if (r.migrationVersion !== version.version || r.centerId !== activeCenterId) return r;
-      if (r.migrationStatus === 'migrated') {
-        restoredCount++;
-        return {
-          ...r,
-          migrationVersion: undefined,
-          migrationStatus: undefined,
-          migrationRolledBack: true,
-        };
-      }
-      if (r.migrationStatus === 'pending_confirm') {
-        restoredCount++;
-        return {
-          ...r,
-          migrationVersion: undefined,
-          migrationStatus: undefined,
-          migrationRolledBack: true,
-        };
-      }
-      return r;
-    });
+    let removedNewCount = 0;
+    let restoredDeletedCount = 0;
+    let restoredUpdatedCount = 0;
+
+    const snapMap = new Map((snapshot.fullRecordSnapshots || []).map(s => [s.id, s]));
+    const addedIds = new Set(snapshot.addedRecordIds || []);
+    const deletedIds = new Set(snapshot.deletedRecordIds || []);
+
+    let nextRecords = records
+      .filter(r => {
+        if (addedIds.has(r.id) && r.centerId === activeCenterId) {
+          removedNewCount++;
+          restoredCount++;
+          addAuditEntry({
+            action: 'rollback_remove_added',
+            target: r.id,
+            migrationId: migrationId,
+            detail: `[回滚] 移除迁移新增的访视 ${r.subjectNo} ${r.visitName}`,
+            operator: '版本管理',
+            source: `回滚迁移 ${migrationRecord.version}`,
+          });
+          return false;
+        }
+        return true;
+      })
+      .map(r => {
+        if (r.centerId !== activeCenterId) return r;
+        if (!r.migrationId || r.migrationId !== version.id) return r;
+
+        if (snapMap.has(r.id)) {
+          const original = snapMap.get(r.id);
+          if (deletedIds.has(r.id) || r._migrationAction === 'delete' || r.migrationStatus === 'marked_removed') {
+            restoredDeletedCount++;
+            restoredCount++;
+            addAuditEntry({
+              action: 'rollback_restore_deleted',
+              target: r.id,
+              migrationId: migrationId,
+              detail: `[回滚] 恢复被标记删除的访视 ${original.subjectNo} ${original.visitName}`,
+              operator: '版本管理',
+              source: `回滚迁移 ${migrationRecord.version}`,
+            });
+            return {
+              ...original,
+              migrationVersion: undefined,
+              migrationStatus: undefined,
+              migrationId: undefined,
+              _migrationAction: undefined,
+              migrationRolledBack: true,
+              timeline: [...(original.timeline || []), {
+                status: '迁移回滚-恢复',
+                at: today,
+                by: '版本管理',
+                note: `回滚迁移 ${migrationRecord.version}，恢复访视记录`,
+                source: `回滚迁移 ${migrationRecord.prevVersion || ''} ← ${migrationRecord.version}`,
+              }],
+            };
+          }
+
+          if (r._migrationAction === 'update' || r.migrationStatus === 'migrated' || r.migrationStatus === 'pending_confirm') {
+            restoredUpdatedCount++;
+            restoredCount++;
+            const upd = (snapshot.updatedRecords || []).find(u => u.recordId === r.id);
+            if (upd) {
+              upd.fieldChanges.forEach(fc => {
+                addAuditEntry({
+                  action: 'rollback_field_restore',
+                  target: r.id,
+                  migrationId: migrationId,
+                  detail: `[回滚] ${original.subjectNo} ${original.visitName} ${fc.label}: ${fc.new} → ${fc.old}`,
+                  operator: '版本管理',
+                  fieldName: fc.field,
+                  oldValue: fc.new,
+                  newValue: fc.old,
+                  source: `回滚迁移 ${migrationRecord.version}`,
+                });
+              });
+            }
+            return {
+              ...original,
+              migrationVersion: undefined,
+              migrationStatus: undefined,
+              migrationId: undefined,
+              _migrationAction: undefined,
+              migrationRolledBack: true,
+              timeline: [...(original.timeline || []), {
+                status: '迁移回滚-还原字段',
+                at: today,
+                by: '版本管理',
+                note: `回滚迁移 ${migrationRecord.version}，还原至迁移前数据`,
+                source: `回滚迁移 ${migrationRecord.prevVersion || ''} ← ${migrationRecord.version}`,
+              }],
+            };
+          }
+        }
+
+        if (r.migrationStatus && r.migrationVersion === version.version) {
+          restoredCount++;
+          return {
+            ...r,
+            migrationVersion: undefined,
+            migrationStatus: undefined,
+            migrationId: undefined,
+            _migrationAction: undefined,
+            migrationRolledBack: true,
+          };
+        }
+
+        return r;
+      });
+
     const nextVersions = versions.map(v => ({
       ...v,
       lastMigration: v.id === version.id ? undefined : v.lastMigration,
+      migrations: (v.migrations || []).map(m =>
+        m.id === migrationId ? { ...m, rolledBack: true, rolledBackAt: today, rolledBackBy: '操作员' } : m
+      ),
     }));
+
     persist(nextRecords);
     persistVersions(nextVersions);
+
     addAuditEntry({
       action: 'rollback_migration',
       target: migrationId,
-      detail: `回滚版本迁移 ${version.templateName} ${version.version}, 恢复${restoredCount}条记录`,
+      detail: `回滚版本迁移 ${migrationRecord.templateName} ${migrationRecord.version}, 还原更新${restoredUpdatedCount}条, 恢复删除${restoredDeletedCount}条, 移除新增${removedNewCount}条, 合计${restoredCount}条`,
       operator: '操作员',
+      stats: {
+        restoredUpdated: restoredUpdatedCount,
+        restoredDeleted: restoredDeletedCount,
+        removedAdded: removedNewCount,
+        total: restoredCount,
+      },
     });
+
+    alert(`回滚完成：\n• 还原字段更新：${restoredUpdatedCount} 条\n• 恢复被删记录：${restoredDeletedCount} 条\n• 移除新增记录：${removedNewCount} 条\n合计：${restoredCount} 条`);
   }
 
   function getVersionHistory(templateId) {
