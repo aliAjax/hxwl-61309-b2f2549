@@ -1,5 +1,5 @@
 import { useMemo, useState, useRef, useCallback } from 'react';
-import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Building2, BarChart3, Edit3, AlertCircle, SearchX, CheckSquare, UserCircle, Clock, Filter, ArrowRight, User, Download, FileArchive, XCircle, Loader2, Table, Archive, FileSpreadsheet } from 'lucide-react';
+import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Building2, BarChart3, Edit3, AlertCircle, SearchX, CheckSquare, UserCircle, Clock, Filter, ArrowRight, User, Download, FileArchive, XCircle, Loader2, Table, Archive, FileSpreadsheet, GitCompare, History, ArrowLeftRight, ShieldCheck, Undo2, RefreshCw, BadgeCheck, Ban, GitBranch, ChevronDown, ChevronUp, FileCheck2, ArrowRightLeft, ClipboardCheck } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -183,6 +183,22 @@ const DEVIATION_SEVERITIES = [
 
 const DEVIATION_TYPES = ['访视超窗', '漏做检查', '用药偏差', '方案违背', '知情同意问题', '数据缺失', '不良事件相关', '其他'];
 
+const VERSION_STORAGE = 'hxwl-61309-versions';
+const AUDIT_STORAGE = 'hxwl-61309-audit';
+
+const MIGRATION_STRATEGIES = [
+  { key: 'keep', label: '保留旧计划', desc: '不迁移，受试者继续按旧版方案执行' },
+  { key: 'migrate', label: '迁移到新计划', desc: '将未执行访视自动迁移至新版方案' },
+  { key: 'manual', label: '人工确认', desc: '标记为待确认，需人工逐条审核后决定' },
+];
+
+const DIFF_TYPES = {
+  added: { label: '新增', className: 'diff-added' },
+  removed: { label: '删除', className: 'diff-removed' },
+  changed: { label: '变更', className: 'diff-changed' },
+  unchanged: { label: '未变', className: 'diff-unchanged' },
+};
+
 function loadDeviations() {
   const raw = localStorage.getItem(appConfig.deviationStorage);
   if (raw) {
@@ -219,6 +235,111 @@ function loadDeviations() {
 
 function saveDeviations(deviations) {
   localStorage.setItem(appConfig.deviationStorage, JSON.stringify(deviations));
+}
+
+function loadVersions() {
+  const raw = localStorage.getItem(VERSION_STORAGE);
+  if (raw) {
+    try { return JSON.parse(raw); } catch {}
+  }
+  return [];
+}
+
+function saveVersions(versions) {
+  localStorage.setItem(VERSION_STORAGE, JSON.stringify(versions));
+}
+
+function loadAudits() {
+  const raw = localStorage.getItem(AUDIT_STORAGE);
+  if (raw) {
+    try { return JSON.parse(raw); } catch {}
+  }
+  return [];
+}
+
+function saveAudits(audits) {
+  localStorage.setItem(AUDIT_STORAGE, JSON.stringify(audits));
+}
+
+function compareVisitLists(oldVisits, newVisits) {
+  const oldMap = new Map((oldVisits || []).filter(v => v.visitName).map(v => [v.visitName, v]));
+  const newMap = new Map((newVisits || []).filter(v => v.visitName).map(v => [v.visitName, v]));
+  const result = [];
+  const allNames = new Set([...oldMap.keys(), ...newMap.keys()]);
+  for (const name of allNames) {
+    const oldV = oldMap.get(name);
+    const newV = newMap.get(name);
+    if (oldV && !newV) {
+      result.push({ visitName: name, type: 'removed', old: oldV, new: null, changes: [] });
+    } else if (!oldV && newV) {
+      result.push({ visitName: name, type: 'added', old: null, new: newV, changes: [] });
+    } else {
+      const changes = [];
+      if (Number(oldV.plannedDays) !== Number(newV.plannedDays)) {
+        changes.push({ field: 'plannedDays', label: '计划天数', oldVal: oldV.plannedDays, newVal: newV.plannedDays });
+      }
+      if (Number(oldV.windowDays || 0) !== Number(newV.windowDays || 0)) {
+        changes.push({ field: 'windowDays', label: '窗口天数', oldVal: oldV.windowDays, newVal: newV.windowDays });
+      }
+      if ((oldV.items || '') !== (newV.items || '')) {
+        changes.push({ field: 'items', label: '检查项目', oldVal: oldV.items, newVal: newV.items });
+      }
+      result.push({
+        visitName: name,
+        type: changes.length > 0 ? 'changed' : 'unchanged',
+        old: oldV,
+        new: newV,
+        changes,
+      });
+    }
+  }
+  return result.sort((a, b) => {
+    const aDays = a.new ? Number(a.new.plannedDays) : Number(a.old.plannedDays);
+    const bDays = b.new ? Number(b.new.plannedDays) : Number(b.old.plannedDays);
+    return aDays - bDays;
+  });
+}
+
+function calculateSubjectImpact(subjectRecords, diffs) {
+  const impacts = [];
+  const completedVisitNames = new Set(
+    subjectRecords.filter(r => r.status === '已完成').map(r => r.visitName)
+  );
+  const manualAdjusted = new Set(
+    subjectRecords.filter(r => r.status === '已完成' && (r.timeline || []).some(t => t.by === '操作员' && t.status === '已完成')).map(r => r.visitName)
+  );
+  for (const diff of diffs) {
+    const isCompleted = completedVisitNames.has(diff.visitName);
+    const isManual = manualAdjusted.has(diff.visitName);
+    if (diff.type === 'added') {
+      impacts.push({
+        visitName: diff.visitName,
+        diffType: diff.type,
+        affected: !isCompleted,
+        reason: isCompleted ? '已完成访视，不受影响' : '新增访视节点，需安排执行',
+        protected: isCompleted,
+      });
+    } else if (diff.type === 'removed') {
+      impacts.push({
+        visitName: diff.visitName,
+        diffType: diff.type,
+        affected: !isCompleted,
+        reason: isCompleted ? '已完成访视，保留记录不被删除' : '访视节点被删除，需确认处理方式',
+        protected: isCompleted,
+      });
+    } else if (diff.type === 'changed') {
+      const changeDescs = diff.changes.map(c => `${c.label}: ${c.oldVal}→${c.newVal}`);
+      impacts.push({
+        visitName: diff.visitName,
+        diffType: diff.type,
+        affected: !isCompleted && !isManual,
+        reason: isCompleted ? '已完成访视，不覆盖' : isManual ? '人工调整记录，需人工确认' : `变更: ${changeDescs.join(', ')}`,
+        protected: isCompleted || isManual,
+        changes: diff.changes,
+      });
+    }
+  }
+  return impacts;
 }
 
 function uid() {
@@ -478,6 +599,18 @@ function App() {
   const [exportProgress, setExportProgress] = useState({ active: false, current: 0, total: 0, phase: '', cancelled: false });
   const exportCancelledRef = useRef(false);
   const [exportHistory, setExportHistory] = useState([]);
+  const [versions, setVersions] = useState(loadVersions);
+  const [audits, setAudits] = useState(loadAudits);
+  const [versionTab, setVersionTab] = useState('list');
+  const [selectedVersionId, setSelectedVersionId] = useState(null);
+  const [comparePair, setComparePair] = useState({ oldId: '', newId: '' });
+  const [migrationForm, setMigrationForm] = useState({
+    versionId: '',
+    subjectStrategies: {},
+    globalStrategy: 'manual',
+  });
+  const [migrationPreview, setMigrationPreview] = useState(null);
+  const [migrationStep, setMigrationStep] = useState('select');
 
   function switchCenter(centerId) {
     setActiveCenterId(centerId);
@@ -1110,6 +1243,244 @@ function App() {
     setExportPreview(null);
   }
 
+  function persistVersions(next) {
+    setVersions(next);
+    saveVersions(next);
+  }
+
+  function persistAudits(next) {
+    setAudits(next);
+    saveAudits(next);
+  }
+
+  function addAuditEntry(entry) {
+    const audit = {
+      id: uid(),
+      timestamp: new Date().toISOString(),
+      ...entry,
+    };
+    persistAudits([audit, ...audits]);
+    return audit;
+  }
+
+  function publishVersion(templateId) {
+    const tpl = templates.find(t => t.id === templateId);
+    if (!tpl) return;
+    const versionNum = versions.filter(v => v.templateId === templateId).length + 1;
+    const newVersion = {
+      id: uid(),
+      templateId: templateId,
+      templateName: tpl.name,
+      version: `v${versionNum}`,
+      visits: (tpl.visits || []).map(v => ({ ...v })),
+      publishedAt: today,
+      publishedBy: '操作员',
+      centerId: activeCenterId,
+      isCurrent: true,
+    };
+    const next = versions.map(v => v.templateId === templateId && v.isCurrent ? { ...v, isCurrent: false } : v);
+    persistVersions([newVersion, ...next]);
+    addAuditEntry({
+      action: 'publish_version',
+      target: newVersion.id,
+      detail: `发布方案版本 ${newVersion.templateName} ${newVersion.version}`,
+      operator: '操作员',
+    });
+    return newVersion;
+  }
+
+  function getComparison() {
+    if (!comparePair.oldId || !comparePair.newId) return null;
+    const oldVer = versions.find(v => v.id === comparePair.oldId);
+    const newVer = versions.find(v => v.id === comparePair.newId);
+    if (!oldVer || !newVer) return null;
+    const diffs = compareVisitLists(oldVer.visits, newVer.visits);
+    return { oldVer, newVer, diffs };
+  }
+
+  function getImpactPreview(versionId) {
+    const ver = versions.find(v => v.id === versionId);
+    if (!ver) return null;
+    const prevVersion = versions
+      .filter(v => v.templateId === ver.templateId && v.publishedAt < ver.publishedAt)
+      .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))[0];
+    if (!prevVersion) return { version: ver, subjects: [], diffs: [] };
+    const diffs = compareVisitLists(prevVersion.visits, ver.visits);
+    const subjectNos = [...new Set(records.filter(r => r.centerId === activeCenterId && r.status !== '已完成').map(r => r.subjectNo))];
+    const subjects = subjectNos.map(sn => {
+      const subRecs = records.filter(r => r.subjectNo === sn && r.centerId === activeCenterId);
+      const impacts = calculateSubjectImpact(subRecs, diffs);
+      return { subjectNo: sn, group: subRecs[0]?.group || '', enrollDate: subRecs[0]?.enrollDate || '', impacts, affectedCount: impacts.filter(i => i.affected).length };
+    });
+    return { version: ver, prevVersion, subjects, diffs };
+  }
+
+  function previewMigration(versionId, globalStrategy) {
+    const impact = getImpactPreview(versionId);
+    if (!impact) return;
+    const strategies = {};
+    for (const subj of impact.subjects) {
+      for (const imp of subj.impacts) {
+        if (!imp.affected) continue;
+        const key = `${subj.subjectNo}__${imp.visitName}`;
+        if (imp.protected) {
+          strategies[key] = 'keep';
+        } else {
+          strategies[key] = globalStrategy;
+        }
+      }
+    }
+    setMigrationForm({ versionId, subjectStrategies: strategies, globalStrategy });
+    setMigrationPreview(impact);
+    setMigrationStep('preview');
+  }
+
+  function executeMigration() {
+    if (!migrationPreview || !migrationForm.versionId) return;
+    const ver = versions.find(v => v.id === migrationForm.versionId);
+    if (!ver) return;
+    const snapshot = [];
+    let changedCount = 0;
+    const nextRecords = records.map(r => {
+      if (r.centerId !== activeCenterId || r.status === '已完成') return r;
+      const key = `${r.subjectNo}__${r.visitName}`;
+      const strategy = migrationForm.subjectStrategies[key];
+      if (!strategy || strategy === 'keep') return r;
+      if (strategy === 'manual') {
+        return { ...r, migrationStatus: 'pending_confirm', migrationVersion: ver.version };
+      }
+      if (strategy === 'migrate') {
+        const newVisit = ver.visits.find(v => v.visitName === r.visitName);
+        if (!newVisit) return r;
+        const oldPlannedDate = r.plannedDate;
+        const newPlannedDate = addDays(r.enrollDate, newVisit.plannedDays);
+        const newStatus = computeVisitStatus(newPlannedDate, newVisit.windowDays, null);
+        snapshot.push({
+          recordId: r.id,
+          subjectNo: r.subjectNo,
+          visitName: r.visitName,
+          oldPlannedDays: r.plannedDays,
+          newPlannedDays: Number(newVisit.plannedDays),
+          oldWindowDays: r.windowDays,
+          newWindowDays: String(newVisit.windowDays ?? 0),
+          oldItems: r.items,
+          newItems: newVisit.items || '',
+          oldPlannedDate,
+          newPlannedDate,
+          oldStatus: r.status,
+          newStatus,
+        });
+        changedCount++;
+        return {
+          ...r,
+          plannedDays: Number(newVisit.plannedDays),
+          windowDays: String(newVisit.windowDays ?? 0),
+          items: newVisit.items || r.items,
+          plannedDate: newPlannedDate,
+          status: newStatus,
+          migrationVersion: ver.version,
+          migrationStatus: 'migrated',
+          timeline: [...(r.timeline || []), {
+            status: `版本迁移 ${ver.version}`,
+            at: today,
+            by: '版本管理',
+            note: `计划天数${r.plannedDays}→${newVisit.plannedDays}, 窗口${r.windowDays}→${newVisit.windowDays ?? 0}`,
+          }],
+        };
+      }
+      return r;
+    });
+    const migrationId = uid();
+    const migrationRecord = {
+      id: migrationId,
+      versionId: ver.id,
+      version: ver.version,
+      templateName: ver.templateName,
+      centerId: activeCenterId,
+      executedAt: today,
+      executedBy: '操作员',
+      changedCount,
+      snapshot,
+      globalStrategy: migrationForm.globalStrategy,
+    };
+    const nextVersions = versions.map(v => ({
+      ...v,
+      lastMigration: v.id === ver.id ? migrationId : v.lastMigration,
+    }));
+    persist(nextRecords);
+    persistVersions(nextVersions);
+    addAuditEntry({
+      action: 'execute_migration',
+      target: migrationId,
+      detail: `执行版本迁移 ${ver.templateName} ${ver.version}, 影响${changedCount}条访视记录`,
+      operator: '操作员',
+      snapshotCount: snapshot.length,
+    });
+    setMigrationStep('done');
+    return migrationRecord;
+  }
+
+  function rollbackMigration(migrationId) {
+    const audit = audits.find(a => a.target === migrationId && a.action === 'execute_migration');
+    if (!audit) return;
+    if (!confirm('确认回滚此迁移操作？将恢复迁移前的访视计划数据。')) return;
+    const version = versions.find(v => v.lastMigration === migrationId);
+    if (!version) return;
+    let restoredCount = 0;
+    const nextRecords = records.map(r => {
+      if (r.migrationVersion !== version.version || r.centerId !== activeCenterId) return r;
+      if (r.migrationStatus === 'migrated') {
+        restoredCount++;
+        return {
+          ...r,
+          migrationVersion: undefined,
+          migrationStatus: undefined,
+          migrationRolledBack: true,
+        };
+      }
+      if (r.migrationStatus === 'pending_confirm') {
+        restoredCount++;
+        return {
+          ...r,
+          migrationVersion: undefined,
+          migrationStatus: undefined,
+          migrationRolledBack: true,
+        };
+      }
+      return r;
+    });
+    const nextVersions = versions.map(v => ({
+      ...v,
+      lastMigration: v.id === version.id ? undefined : v.lastMigration,
+    }));
+    persist(nextRecords);
+    persistVersions(nextVersions);
+    addAuditEntry({
+      action: 'rollback_migration',
+      target: migrationId,
+      detail: `回滚版本迁移 ${version.templateName} ${version.version}, 恢复${restoredCount}条记录`,
+      operator: '操作员',
+    });
+  }
+
+  function getVersionHistory(templateId) {
+    return versions
+      .filter(v => v.templateId === templateId)
+      .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
+  }
+
+  const centerVersions = useMemo(() => {
+    return versions.filter(v => v.centerId === activeCenterId);
+  }, [versions, activeCenterId]);
+
+  const comparison = useMemo(() => {
+    return getComparison();
+  }, [comparePair, versions]);
+
+  const versionAudits = useMemo(() => {
+    return audits.filter(a => a.action && ['publish_version', 'execute_migration', 'rollback_migration'].includes(a.action));
+  }, [audits]);
+
   return (
     <main className="shell" style={{ '--accent': appConfig.accent }}>
       <section className="hero">
@@ -1178,6 +1549,14 @@ function App() {
           onClick={() => { setActiveTab('export'); setSelected(null); setSelectedDev(null); }}
         >
           <FileArchive size={16} />数据导出归档
+        </button>
+        <button
+          type="button"
+          className={'tab-btn ' + (activeTab === 'version' ? 'active' : '')}
+          onClick={() => { setActiveTab('version'); setSelected(null); setSelectedDev(null); }}
+        >
+          <GitBranch size={16} />版本管理与迁移
+          {centerVersions.length > 0 && <span className="tab-badge">{centerVersions.filter(v => v.isCurrent).length}</span>}
         </button>
       </div>
 
@@ -2187,6 +2566,517 @@ function App() {
                 <li>如需按中心分别导出，请在顶部切换到具体中心后再执行导出</li>
               </ul>
             </div>
+          </section>
+        </section>
+      ) : activeTab === 'version' ? (
+        <section className="version-workspace">
+          <section className="panel version-sidebar">
+            <div className="panel-title">
+              <GitBranch size={18} />
+              <h2>方案版本</h2>
+            </div>
+
+            <div className="version-sub-tabs">
+              <button type="button" className={'version-sub-btn ' + (versionTab === 'list' ? 'active' : '')} onClick={() => setVersionTab('list')}>
+                <History size={14} />版本列表
+              </button>
+              <button type="button" className={'version-sub-btn ' + (versionTab === 'compare' ? 'active' : '')} onClick={() => setVersionTab('compare')}>
+                <GitCompare size={14} />版本对比
+              </button>
+              <button type="button" className={'version-sub-btn ' + (versionTab === 'audit' ? 'active' : '')} onClick={() => setVersionTab('audit')}>
+                <ShieldCheck size={14} />审计日志
+              </button>
+            </div>
+
+            {versionTab === 'list' && (
+              <div className="version-list-section">
+                <div className="version-publish-row">
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        if (!confirm('确认基于当前模板发布新版本？发布后将成为当前生效版本。')) return;
+                        publishVersion(e.target.value);
+                        e.target.value = '';
+                      }
+                    }}
+                  >
+                    <option value="">选择模板发布新版本...</option>
+                    {centerTemplates.map(t => (
+                      <option key={t.id} value={t.id}>{t.name}（{(t.visits || []).length}个访视）</option>
+                    ))}
+                  </select>
+                </div>
+
+                {centerVersions.length === 0 ? (
+                  <p className="empty" style={{ textAlign: 'center', padding: 30 }}>
+                    暂无版本记录。<br />选择一个访视方案模板发布首个版本。
+                  </p>
+                ) : (
+                  <div className="version-cards">
+                    {(() => {
+                      const grouped = {};
+                      centerVersions.forEach(v => {
+                        const key = v.templateId;
+                        (grouped[key] ||= []).push(v);
+                      });
+                      return Object.entries(grouped).map(([tplId, vers]) => {
+                        const sorted = vers.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
+                        return (
+                          <div key={tplId} className="version-group">
+                            <div className="version-group-title">
+                              <FileText size={14} />
+                              <strong>{sorted[0]?.templateName || '未知方案'}</strong>
+                              <span className="version-count">{sorted.length} 个版本</span>
+                            </div>
+                            {sorted.map(v => (
+                              <div
+                                key={v.id}
+                                className={'version-card ' + (selectedVersionId === v.id ? 'selected' : '') + (v.isCurrent ? ' current' : '')}
+                                onClick={() => setSelectedVersionId(v.id)}
+                              >
+                                <div className="version-card-head">
+                                  <span className="version-tag">{v.version}</span>
+                                  {v.isCurrent && <span className="version-current-badge">当前生效</span>}
+                                  {v.lastMigration && <span className="version-migrated-badge">已迁移</span>}
+                                </div>
+                                <div className="version-card-meta">
+                                  <span>{v.publishedAt} · {v.publishedBy}</span>
+                                  <span>{(v.visits || []).length} 个访视</span>
+                                </div>
+                                <div className="version-card-visits">
+                                  {(v.visits || [])
+                                    .filter(vv => vv.visitName)
+                                    .sort((a, b) => Number(a.plannedDays) - Number(b.plannedDays))
+                                    .slice(0, 5)
+                                    .map((vv, i) => (
+                                      <span key={i} className="version-visit-chip">
+                                        {vv.visitName} D{vv.plannedDays}
+                                      </span>
+                                    ))
+                                  }
+                                  {(v.visits || []).length > 5 && (
+                                    <span className="version-visit-more">+{(v.visits || []).length - 5}</span>
+                                  )}
+                                </div>
+                                {v.lastMigration && (
+                                  <button
+                                    type="button"
+                                    className="version-rollback-btn"
+                                    onClick={(e) => { e.stopPropagation(); rollbackMigration(v.lastMigration); }}
+                                  >
+                                    <Undo2 size={12} />回滚迁移
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      });
+                    })()}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {versionTab === 'compare' && (
+              <div className="version-compare-section">
+                <div className="compare-selectors">
+                  <label>
+                    <span>旧版本</span>
+                    <select value={comparePair.oldId} onChange={(e) => setComparePair({ ...comparePair, oldId: e.target.value })}>
+                      <option value="">选择旧版本...</option>
+                      {centerVersions.map(v => (
+                        <option key={v.id} value={v.id}>{v.templateName} {v.version} ({v.publishedAt})</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>新版本</span>
+                    <select value={comparePair.newId} onChange={(e) => setComparePair({ ...comparePair, newId: e.target.value })}>
+                      <option value="">选择新版本...</option>
+                      {centerVersions.map(v => (
+                        <option key={v.id} value={v.id}>{v.templateName} {v.version} ({v.publishedAt})</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                {comparison && (
+                  <div className="compare-summary">
+                    <div className="compare-summary-stats">
+                      <span className="diff-added">{comparison.diffs.filter(d => d.type === 'added').length} 新增</span>
+                      <span className="diff-removed">{comparison.diffs.filter(d => d.type === 'removed').length} 删除</span>
+                      <span className="diff-changed">{comparison.diffs.filter(d => d.type === 'changed').length} 变更</span>
+                      <span className="diff-unchanged">{comparison.diffs.filter(d => d.type === 'unchanged').length} 未变</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {versionTab === 'audit' && (
+              <div className="version-audit-section">
+                {versionAudits.length === 0 ? (
+                  <p className="empty" style={{ textAlign: 'center', padding: 20 }}>暂无审计记录。</p>
+                ) : (
+                  <div className="audit-list">
+                    {versionAudits.map(a => (
+                      <div key={a.id} className="audit-entry">
+                        <div className="audit-icon">
+                          {a.action === 'publish_version' && <FileCheck2 size={14} />}
+                          {a.action === 'execute_migration' && <ArrowRightLeft size={14} />}
+                          {a.action === 'rollback_migration' && <Undo2 size={14} />}
+                        </div>
+                        <div className="audit-body">
+                          <div className="audit-detail">{a.detail}</div>
+                          <div className="audit-meta">
+                            <span>{a.timestamp ? new Date(a.timestamp).toLocaleString('zh-CN') : ''}</span>
+                            <span>{a.operator}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
+          <section className="panel version-main">
+            {versionTab === 'list' && selectedVersionId && (() => {
+              const ver = centerVersions.find(v => v.id === selectedVersionId);
+              if (!ver) return <p className="empty">请选择一个版本查看详情。</p>;
+              return (
+                <div className="version-detail">
+                  <div className="panel-title">
+                    <FileCheck2 size={18} />
+                    <h2>{ver.templateName} {ver.version}</h2>
+                    {ver.isCurrent && <span className="version-current-badge" style={{ marginLeft: 8 }}>当前生效</span>}
+                  </div>
+                  <div className="version-detail-meta">
+                    <span><Clock size={12} /> 发布日期：{ver.publishedAt}</span>
+                    <span><User size={12} /> 发布人：{ver.publishedBy}</span>
+                    <span><ClipboardList size={12} /> 访视数量：{(ver.visits || []).length}</span>
+                  </div>
+
+                  <div className="version-visit-table-wrap">
+                    <table className="version-visit-table">
+                      <thead>
+                        <tr>
+                          <th>访视名称</th>
+                          <th>计划天数</th>
+                          <th>窗口(±天)</th>
+                          <th>检查项目</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(ver.visits || [])
+                          .filter(v => v.visitName)
+                          .sort((a, b) => Number(a.plannedDays) - Number(b.plannedDays))
+                          .map((v, i) => (
+                            <tr key={i}>
+                              <td><strong>{v.visitName}</strong></td>
+                              <td>D{v.plannedDays}</td>
+                              <td>±{v.windowDays || 0}</td>
+                              <td>{v.items || '-'}</td>
+                            </tr>
+                          ))
+                        }
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {ver.isCurrent && (
+                    <div className="version-migration-section">
+                      <div className="panel-title">
+                        <ArrowRightLeft size={18} />
+                        <h3>访视计划迁移</h3>
+                      </div>
+                      <p className="hint" style={{ marginBottom: 12 }}>
+                        将当前生效版本的访视计划迁移到已入组受试者。已完成访视和人工调整记录不会被覆盖。
+                      </p>
+
+                      {migrationStep === 'select' && (
+                        <div className="migration-select">
+                          <label>
+                            <span>全局迁移策略</span>
+                            <select
+                              value={migrationForm.globalStrategy}
+                              onChange={(e) => setMigrationForm({ ...migrationForm, globalStrategy: e.target.value })}
+                            >
+                              {MIGRATION_STRATEGIES.map(s => (
+                                <option key={s.key} value={s.key}>{s.label}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <div className="strategy-desc">
+                            {MIGRATION_STRATEGIES.find(s => s.key === migrationForm.globalStrategy)?.desc}
+                          </div>
+                          <button
+                            type="button"
+                            className="primary"
+                            onClick={() => previewMigration(ver.id, migrationForm.globalStrategy)}
+                          >
+                            <Eye size={16} />预览迁移影响
+                          </button>
+                        </div>
+                      )}
+
+                      {migrationStep === 'preview' && migrationPreview && (
+                        <div className="migration-preview">
+                          <div className="migration-preview-header">
+                            <h4>
+                              <AlertTriangle size={16} /> 迁移影响预览
+                            </h4>
+                            <span className="migration-diff-summary">
+                              {migrationPreview.diffs.filter(d => d.type !== 'unchanged').length} 项差异 · {migrationPreview.subjects.filter(s => s.affectedCount > 0).length} 位受试者受影响
+                            </span>
+                          </div>
+
+                          {migrationPreview.diffs.filter(d => d.type !== 'unchanged').length > 0 && (
+                            <div className="migration-diffs">
+                              <strong>方案差异：</strong>
+                              {migrationPreview.diffs.filter(d => d.type !== 'unchanged').map((d, i) => (
+                                <span key={i} className={'diff-badge ' + (DIFF_TYPES[d.type]?.className || '')}>
+                                  {d.visitName}: {DIFF_TYPES[d.type]?.label || d.type}
+                                  {d.type === 'changed' && d.changes.length > 0 && (
+                                    <em>({d.changes.map(c => `${c.label} ${c.oldVal}→${c.newVal}`).join(', ')})</em>
+                                  )}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                          {migrationPreview.subjects.length === 0 ? (
+                            <p className="empty" style={{ padding: 16, textAlign: 'center' }}>当前中心没有已入组受试者需要迁移。</p>
+                          ) : (
+                            <div className="migration-subjects">
+                              {migrationPreview.subjects.filter(s => s.affectedCount > 0).map(subj => (
+                                <div key={subj.subjectNo} className="migration-subject-card">
+                                  <div className="migration-subject-head">
+                                    <strong>{subj.subjectNo}</strong>
+                                    <span>{subj.group} · 入组{subj.enrollDate}</span>
+                                    <span className="migration-affected-count">{subj.affectedCount} 项受影响</span>
+                                  </div>
+                                  <div className="migration-impact-list">
+                                    {subj.impacts.filter(imp => imp.affected).map((imp, i) => (
+                                      <div key={i} className="migration-impact-item">
+                                        <div className="migration-impact-visit">
+                                          <span className={'diff-badge ' + (DIFF_TYPES[imp.diffType]?.className || '')}>
+                                            {DIFF_TYPES[imp.diffType]?.label || imp.diffType}
+                                          </span>
+                                          <strong>{imp.visitName}</strong>
+                                        </div>
+                                        <div className="migration-impact-reason">{imp.reason}</div>
+                                        {!imp.protected && (
+                                          <div className="migration-impact-strategy">
+                                            <label>
+                                              <span>策略</span>
+                                              <select
+                                                value={migrationForm.subjectStrategies[`${subj.subjectNo}__${imp.visitName}`] || 'manual'}
+                                                onChange={(e) => {
+                                                  const next = { ...migrationForm.subjectStrategies };
+                                                  next[`${subj.subjectNo}__${imp.visitName}`] = e.target.value;
+                                                  setMigrationForm({ ...migrationForm, subjectStrategies: next });
+                                                }}
+                                              >
+                                                {MIGRATION_STRATEGIES.map(s => (
+                                                  <option key={s.key} value={s.key}>{s.label}</option>
+                                                ))}
+                                              </select>
+                                            </label>
+                                          </div>
+                                        )}
+                                        {imp.protected && (
+                                          <div className="migration-impact-protected">
+                                            <ShieldCheck size={12} /> 受保护（不覆盖）
+                                          </div>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          <div className="migration-actions">
+                            <button type="button" className="secondary-btn" onClick={() => { setMigrationStep('select'); setMigrationPreview(null); }}>
+                              <RotateCcw size={14} />返回修改
+                            </button>
+                            <button
+                              type="button"
+                              className="primary"
+                              onClick={() => {
+                                if (!confirm('确认执行迁移？未执行访视将按所选策略更新。')) return;
+                                executeMigration();
+                              }}
+                              disabled={!migrationPreview.subjects.some(s => s.affectedCount > 0)}
+                            >
+                              <ArrowRightLeft size={16} />执行迁移
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {migrationStep === 'done' && (
+                        <div className="migration-done">
+                          <div className="migration-done-icon">
+                            <CheckCircle2 size={40} />
+                          </div>
+                          <h3>迁移完成</h3>
+                          <p>访视计划已按策略更新。已完成访视和人工调整记录保持不变。</p>
+                          <p className="hint">可在"审计日志"标签页查看本次迁移的详细记录。如需撤销，可在版本卡片中点击"回滚迁移"。</p>
+                          <button type="button" className="secondary-btn" onClick={() => { setMigrationStep('select'); setMigrationPreview(null); }}>
+                            <RefreshCw size={14} />再次迁移
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {versionTab === 'list' && !selectedVersionId && (
+              <div className="version-main-empty">
+                <GitBranch size={48} />
+                <h3>选择一个版本查看详情</h3>
+                <p>在左侧版本列表中点击某个版本，可查看其访视配置、执行迁移操作。</p>
+                <p className="hint">如需对比两个版本，请切换到"版本对比"标签。</p>
+              </div>
+            )}
+
+            {versionTab === 'compare' && comparison && (
+              <div className="compare-detail">
+                <div className="panel-title">
+                  <GitCompare size={18} />
+                  <h2>{comparison.oldVer.templateName} {comparison.oldVer.version} → {comparison.newVer.version}</h2>
+                </div>
+
+                <div className="compare-versions-row">
+                  <div className="compare-version-col">
+                    <h4>{comparison.oldVer.version}（旧）· {comparison.oldVer.publishedAt}</h4>
+                    <table className="compare-table">
+                      <thead>
+                        <tr><th>访视</th><th>天数</th><th>窗口</th><th>项目</th></tr>
+                      </thead>
+                      <tbody>
+                        {(comparison.oldVer.visits || []).filter(v => v.visitName).sort((a, b) => Number(a.plannedDays) - Number(b.plannedDays)).map((v, i) => (
+                          <tr key={i}><td>{v.visitName}</td><td>D{v.plannedDays}</td><td>±{v.windowDays || 0}</td><td>{v.items || '-'}</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="compare-arrow-col">
+                    <ArrowLeftRight size={20} />
+                  </div>
+                  <div className="compare-version-col">
+                    <h4>{comparison.newVer.version}（新）· {comparison.newVer.publishedAt}</h4>
+                    <table className="compare-table">
+                      <thead>
+                        <tr><th>访视</th><th>天数</th><th>窗口</th><th>项目</th></tr>
+                      </thead>
+                      <tbody>
+                        {(comparison.newVer.visits || []).filter(v => v.visitName).sort((a, b) => Number(a.plannedDays) - Number(b.plannedDays)).map((v, i) => (
+                          <tr key={i}><td>{v.visitName}</td><td>D{v.plannedDays}</td><td>±{v.windowDays || 0}</td><td>{v.items || '-'}</td></tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="compare-diff-list">
+                  <h4><GitCompare size={14} /> 差异明细</h4>
+                  {comparison.diffs.length === 0 ? (
+                    <p className="empty">两个版本完全一致。</p>
+                  ) : (
+                    <table className="diff-table">
+                      <thead>
+                        <tr>
+                          <th>访视名称</th>
+                          <th>差异类型</th>
+                          <th>旧计划天数</th>
+                          <th>新计划天数</th>
+                          <th>旧窗口</th>
+                          <th>新窗口</th>
+                          <th>检查项目变更</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {comparison.diffs.map((d, i) => (
+                          <tr key={i} className={'diff-row ' + (DIFF_TYPES[d.type]?.className || '')}>
+                            <td><strong>{d.visitName}</strong></td>
+                            <td><span className={'diff-badge ' + (DIFF_TYPES[d.type]?.className || '')}>{DIFF_TYPES[d.type]?.label || d.type}</span></td>
+                            <td>{d.old ? `D${d.old.plannedDays}` : '-'}</td>
+                            <td>{d.new ? `D${d.new.plannedDays}` : '-'}</td>
+                            <td>{d.old ? `±${d.old.windowDays || 0}` : '-'}</td>
+                            <td>{d.new ? `±${d.new.windowDays || 0}` : '-'}</td>
+                            <td>
+                              {d.type === 'changed' ? d.changes.map((c, j) => (
+                                <span key={j} className="diff-change-item">
+                                  {c.label}: {String(c.oldVal)}→{String(c.newVal)}
+                                </span>
+                              )) : d.type === 'added' ? (d.new?.items || '-') : (d.old?.items || '-')}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {versionTab === 'compare' && !comparison && (
+              <div className="version-main-empty">
+                <GitCompare size={48} />
+                <h3>选择两个版本进行对比</h3>
+                <p>在左侧分别选择旧版本和新版本，系统将自动比较访视节点、相对天数、窗口和检查项目的差异。</p>
+              </div>
+            )}
+
+            {versionTab === 'audit' && (
+              <div className="audit-detail-panel">
+                <div className="panel-title">
+                  <ShieldCheck size={18} />
+                  <h2>版本管理审计日志</h2>
+                </div>
+                <p className="hint" style={{ marginBottom: 16 }}>
+                  记录所有版本发布、迁移执行和回滚操作，每条日期和状态变化均可追溯来源。
+                </p>
+                {versionAudits.length === 0 ? (
+                  <p className="empty" style={{ padding: 30, textAlign: 'center' }}>暂无审计记录。发布版本或执行迁移后将自动记录。</p>
+                ) : (
+                  <table className="audit-table">
+                    <thead>
+                      <tr>
+                        <th>时间</th>
+                        <th>操作类型</th>
+                        <th>操作人</th>
+                        <th>详情</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {versionAudits.map(a => (
+                        <tr key={a.id}>
+                          <td className="audit-time">{a.timestamp ? new Date(a.timestamp).toLocaleString('zh-CN') : '-'}</td>
+                          <td>
+                            <span className={'audit-type-badge audit-type-' + a.action}>
+                              {a.action === 'publish_version' && '发布版本'}
+                              {a.action === 'execute_migration' && '执行迁移'}
+                              {a.action === 'rollback_migration' && '回滚迁移'}
+                            </span>
+                          </td>
+                          <td>{a.operator}</td>
+                          <td>{a.detail}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
           </section>
         </section>
       ) : null}
