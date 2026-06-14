@@ -366,6 +366,12 @@ function App() {
   const [devFilters, setDevFilters] = useState({ query: '', severity: '全部', type: '全部' });
   const [selectedDev, setSelectedDev] = useState(null);
 
+  function switchCenter(centerId) {
+    setActiveCenterId(centerId);
+    setSelected(null);
+    setSelectedDev(null);
+  }
+
   function persistDeviations(next) {
     setDeviations(next);
     saveDeviations(next);
@@ -469,7 +475,7 @@ function App() {
     } else {
       const newCenter = { ...centerForm, id: uid(), createdAt: today };
       persistCenters([newCenter, ...centers]);
-      setActiveCenterId(newCenter.id);
+      switchCenter(newCenter.id);
     }
     setCenterForm({ id: '', name: '', code: '', pi: '', location: '' });
   }
@@ -488,7 +494,7 @@ function App() {
     const nextDevs = deviations.map(d => d.centerId === id ? { ...d, centerId: 'default' } : d);
     persistDeviations(nextDevs);
     persistCenters(centers.filter(c => c.id !== id));
-    if (activeCenterId === id) setActiveCenterId('default');
+    if (activeCenterId === id) switchCenter('default');
     if (centerForm.id === id) setCenterForm({ id: '', name: '', code: '', pi: '', location: '' });
   }
 
@@ -701,7 +707,7 @@ function App() {
       const key = item.subjectNo || '未命名';
       (acc[key] ||= []).push(item);
       return acc;
-    }, [centerRecords]);
+    }, {});
   }, [centerRecords]);
 
   const centerTemplates = useMemo(() => {
@@ -754,9 +760,9 @@ function App() {
           <p>{appConfig.subtitle}</p>
         </div>
         <div className="hero-right">
-          <div className="center-selector">
-            <Building2 size={16} />
-            <select value={activeCenterId} onChange={(e) => { setActiveCenterId(e.target.value); setSelected(null); }}>
+            <div className="center-selector">
+              <Building2 size={16} />
+            <select value={activeCenterId} onChange={(e) => switchCenter(e.target.value)}>
               <option value="__hq__">📊 总部汇总</option>
               {centers.map(c => <option key={c.id} value={c.id}>{c.name}（{c.code}）</option>)}
             </select>
@@ -835,7 +841,7 @@ function App() {
                         <h3>{c.name}</h3>
                         <p>{c.code}{c.pi ? ` · PI: ${c.pi}` : ''}{c.location ? ` · ${c.location}` : ''}</p>
                       </div>
-                      <button type="button" className="link-btn" onClick={() => setActiveCenterId(c.id)}>
+                      <button type="button" className="link-btn" onClick={() => switchCenter(c.id)}>
                         切换到此中心
                       </button>
                     </div>
@@ -1553,7 +1559,7 @@ function App() {
                 const cRecords = records.filter(r => r.centerId === c.id);
                 const cSubjects = new Set(cRecords.map(r => r.subjectNo)).size;
                 return (
-                  <article className={'record center-record ' + (activeCenterId === c.id ? 'selected-center' : '')} key={c.id} onClick={() => { setActiveCenterId(c.id); setSelected(null); }}>
+                  <article className={'record center-record ' + (activeCenterId === c.id ? 'selected-center' : '')} key={c.id} onClick={() => switchCenter(c.id)}>
                     <div className="record-head">
                       <div>
                         <h3><Building2 size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />{c.name}</h3>
