@@ -1260,7 +1260,8 @@ function App() {
       timestamp: new Date().toISOString(),
       ...entry,
     };
-    persistAudits([audit, ...audits]);
+    const latestAudits = loadAudits();
+    persistAudits([audit, ...latestAudits]);
     return audit;
   }
 
