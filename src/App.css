@@ -3180,6 +3180,24 @@ textarea { min-height: 76px; resize: vertical; }
   color: #be123c;
 }
 
+.hq-stat.pending {
+  border-color: #fde68a;
+  background: #fffbeb;
+}
+
+.hq-stat.pending strong {
+  color: #92400e;
+}
+
+.hq-stat.critical {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.hq-stat.critical strong {
+  color: #9f1239;
+}
+
 .hq-comparison-table-wrap {
   overflow-x: auto;
   border: 1px solid #e5e7eb;
