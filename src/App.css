@@ -328,6 +328,9 @@ textarea { min-height: 76px; resize: vertical; }
   gap: 10px;
   margin-bottom: 14px;
 }
+.toolbar select {
+  min-width: 130px;
+}
 
 .search {
   flex: 1;

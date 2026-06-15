@@ -578,7 +578,7 @@ function App() {
 
   const [records, setRecords] = useState(loadRecords);
   const [form, setForm] = useState(appConfig.defaultValues);
-  const [filters, setFilters] = useState({ query: '', status: '全部' });
+  const [filters, setFilters] = useState({ query: '', status: '全部', windowFilter: '全部' });
   const [selected, setSelected] = useState(null);
   const [activeTab, setActiveTab] = useState('record');
 
@@ -981,24 +981,60 @@ function App() {
     return records.filter(r => r.centerId === activeCenterId);
   }, [records, activeCenterId]);
 
+  const matchWindowFilter = useCallback((item, filter) => {
+    if (filter === '全部') return true;
+    const todayTime = new Date(today).getTime();
+    const oneDay = 24 * 60 * 60 * 1000;
+    const plannedDate = item.plannedDate;
+    const windowDays = Number(item.windowDays) || 0;
+
+    if (filter === '未排期') {
+      return !plannedDate;
+    }
+    if (!plannedDate) return false;
+
+    const plannedTime = new Date(plannedDate).getTime();
+    const diffDays = Math.ceil((plannedTime - todayTime) / oneDay);
+
+    if (filter === '未来7天') {
+      return diffDays >= 0 && diffDays <= 7;
+    }
+    if (filter === '未来14天') {
+      return diffDays >= 0 && diffDays <= 14;
+    }
+    if (filter === '已超窗') {
+      const windowEndTime = new Date(plannedDate).getTime() + windowDays * oneDay;
+      return todayTime > windowEndTime;
+    }
+    return true;
+  }, [today]);
+
   const filteredRecords = useMemo(() => {
     return records
       .filter((item) => item.centerId === activeCenterId)
       .filter((item) => !filters.query || `${item.subjectNo}${item.group}${item.visitName}`.includes(filters.query))
       .filter((item) => filters.status === '全部' || item.status === filters.status)
+      .filter((item) => matchWindowFilter(item, filters.windowFilter))
       .sort((a, b) => {
+        const aPlanned = a.plannedDate || '';
+        const bPlanned = b.plannedDate || '';
+        if (aPlanned !== bPlanned) {
+          if (!aPlanned) return 1;
+          if (!bPlanned) return -1;
+          return String(aPlanned).localeCompare(String(bPlanned));
+        }
         const aDate = a.enrollDate || a.createdAt || '';
         const bDate = b.enrollDate || b.createdAt || '';
         if (aDate !== bDate) return String(aDate).localeCompare(String(bDate));
         return (a.plannedDays ?? 0) - (b.plannedDays ?? 0);
       });
-  }, [records, filters, activeCenterId]);
+  }, [records, filters, activeCenterId, matchWindowFilter]);
 
-  const metrics = [
-    { label: "受试者", value: new Set(centerRecords.map((item) => item.subjectNo)).size },
-    { label: "窗口内", value: centerRecords.filter((item) => item.status === '窗口内').length },
-    { label: "已超窗", value: centerRecords.filter((item) => item.status === '已超窗').length },
-  ];
+  const metrics = useMemo(() => [
+    { label: "受试者", value: new Set(filteredRecords.map((item) => item.subjectNo)).size },
+    { label: "窗口内", value: filteredRecords.filter((item) => item.status === '窗口内').length },
+    { label: "已超窗", value: filteredRecords.filter((item) => item.status === '已超窗').length },
+  ], [filteredRecords]);
 
   const groupedByDate = useMemo(() => {
     return filteredRecords.reduce((acc, item) => {
@@ -2372,6 +2408,13 @@ function App() {
               <select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
                 <option>全部</option>
                 {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
+              </select>
+              <select value={filters.windowFilter} onChange={(event) => setFilters({ ...filters, windowFilter: event.target.value })}>
+                <option>全部</option>
+                <option>未来7天</option>
+                <option>未来14天</option>
+                <option>已超窗</option>
+                <option>未排期</option>
               </select>
             </div>
 
