@@ -7,6 +7,7 @@ import {
   ConflictResolver,
   OperationQueueViewer,
   AuditLogViewer,
+  SchemaVersionManager,
 } from './sync';
 
 const appConfig = {
@@ -573,6 +574,7 @@ function App() {
   const [showConflictResolver, setShowConflictResolver] = useState(false);
   const [showOpQueue, setShowOpQueue] = useState(false);
   const [showAuditLog, setShowAuditLog] = useState(false);
+  const [showVersionManager, setShowVersionManager] = useState(false);
 
   const [records, setRecords] = useState(loadRecords);
   const [form, setForm] = useState(appConfig.defaultValues);
@@ -2002,6 +2004,8 @@ function App() {
         onOpenConflicts={() => setShowConflictResolver(true)}
         onOpenOperations={() => setShowOpQueue(true)}
         onOpenAuditLog={() => setShowAuditLog(true)}
+        onOpenVersionManager={() => setShowVersionManager(true)}
+        currentSchemaVersion={sync.getCurrentSchemaVersion()}
       />
 
       <div className="tabs">
@@ -3792,11 +3796,27 @@ function App() {
           serverAuditLog={sync.getServerAuditLog()}
           clientAuditLog={sync.getClientAuditLog()}
           syncStatistics={sync.getSyncStatistics()}
+          currentSchemaVersion={sync.getCurrentSchemaVersion()}
+          schemaVersionHistory={sync.getSchemaVersionHistory()}
           getFullAuditTrail={sync.getFullAuditTrail}
           simulateServerConflict={sync.simulateServerConflict}
           simulateServerDelete={sync.simulateServerDelete}
           clearAllSyncData={sync.clearAllSyncData}
           onClose={() => setShowAuditLog(false)}
+        />
+      )}
+
+      {showVersionManager && (
+        <SchemaVersionManager
+          currentVersion={sync.getCurrentSchemaVersion()}
+          versionHistory={sync.getSchemaVersionHistory()}
+          syncStatistics={sync.getSyncStatistics()}
+          serverAuditLog={sync.getServerAuditLog()}
+          enqueuePublishVersion={sync.enqueuePublishVersion}
+          enqueueExecuteMigration={sync.enqueueExecuteMigration}
+          enqueueRollbackMigration={sync.enqueueRollbackMigration}
+          startSync={sync.startSync}
+          onClose={() => setShowVersionManager(false)}
         />
       )}
     </main>

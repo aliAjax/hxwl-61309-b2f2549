@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import {
   History, Database, User, Clock, AlertTriangle, CheckCircle, XCircle,
   RefreshCw, Server, Monitor, Filter, ChevronDown, ChevronRight,
-  FileText, Download, AlertCircle, Shield
+  FileText, Download, AlertCircle, Shield, Tags
 } from 'lucide-react';
 import { OPERATION_TYPES, CONFLICT_TYPES } from '../types';
 
@@ -10,6 +10,8 @@ export function AuditLogViewer({
   serverAuditLog,
   clientAuditLog,
   syncStatistics,
+  currentSchemaVersion,
+  schemaVersionHistory,
   getFullAuditTrail,
   simulateServerConflict,
   simulateServerDelete,
@@ -155,6 +157,20 @@ export function AuditLogViewer({
                 {syncStatistics?.database?.deviations || 0} 偏差 ·
                 {syncStatistics?.database?.templates || 0} 模板 ·
                 {syncStatistics?.database?.centers || 0} 中心
+              </span>
+            </div>
+          </div>
+        </div>
+        <div className="audit-stat-card">
+          <div className="audit-stat-icon audit-stat-version">
+            <Tags size={24} />
+          </div>
+          <div className="audit-stat-info">
+            <div className="audit-stat-label">方案版本</div>
+            <div className="audit-stat-value">
+              v{currentSchemaVersion || 0}
+              <span className="audit-stat-sub">
+                已发布 {schemaVersionHistory?.length || 0} 个版本
               </span>
             </div>
           </div>
@@ -321,6 +337,7 @@ export function AuditLogViewer({
             <option value="deviation">偏差记录</option>
             <option value="template">访视模板</option>
             <option value="center">研究中心</option>
+            <option value="schema">方案版本</option>
           </select>
         </div>
         <div className="audit-filter-item">
@@ -516,6 +533,7 @@ export function AuditLogViewer({
             <option value="deviation">偏差记录</option>
             <option value="template">访视模板</option>
             <option value="center">研究中心</option>
+            <option value="schema">方案版本</option>
           </select>
         </div>
         <div className="audit-filter-count">

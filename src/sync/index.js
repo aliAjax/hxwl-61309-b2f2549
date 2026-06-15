@@ -6,4 +6,5 @@ export { SyncStatusBar } from './components/SyncStatusBar';
 export { ConflictResolver } from './components/ConflictResolver';
 export { OperationQueueViewer } from './components/OperationQueueViewer';
 export { AuditLogViewer } from './components/AuditLogViewer';
+export { SchemaVersionManager } from './components/SchemaVersionManager';
 import './sync.css';

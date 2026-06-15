@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { Wifi, WifiOff, RefreshCw, AlertTriangle, CheckCircle, Loader2, Clock, XCircle, ChevronDown, ChevronUp, History } from 'lucide-react';
+import { Wifi, WifiOff, RefreshCw, AlertTriangle, CheckCircle, Loader2, Clock, XCircle, ChevronDown, ChevronUp, History, Tags } from 'lucide-react';
 import { SYNC_STATUSES, OPERATION_STATUSES } from '../types';
 
-export function SyncStatusBar({ syncState, startSync, retryAllFailed, clearSynced, getOpDescription, onOpenConflicts, onOpenOperations, onOpenAuditLog }) {
+export function SyncStatusBar({ syncState, startSync, retryAllFailed, clearSynced, getOpDescription, onOpenConflicts, onOpenOperations, onOpenAuditLog, onOpenVersionManager, currentSchemaVersion }) {
   const [expanded, setExpanded] = useState(false);
 
   const statusConfig = {
@@ -107,6 +107,10 @@ export function SyncStatusBar({ syncState, startSync, retryAllFailed, clearSynce
             <button type="button" className="sync-action-btn" onClick={(e) => { e.stopPropagation(); onOpenOperations?.(); }}>
               <CheckCircle size={14} />
               查看操作队列 ({syncState.operationQueue.length})
+            </button>
+            <button type="button" className="sync-action-btn" onClick={(e) => { e.stopPropagation(); onOpenVersionManager?.(); }}>
+              <Tags size={14} />
+              方案版本 {currentSchemaVersion ? `v${currentSchemaVersion}` : ''}
             </button>
             <button type="button" className="sync-action-btn" onClick={(e) => { e.stopPropagation(); onOpenAuditLog?.(); }}>
               <History size={14} />

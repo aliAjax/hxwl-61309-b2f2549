@@ -90,6 +90,61 @@ export function useSync() {
     );
   }, []);
 
+  const enqueuePublishVersion = useCallback((versionData, options = {}) => {
+    const versionId = `v-${Date.now()}`;
+    return syncManager.enqueueOperation(
+      OPERATION_TYPES.PUBLISH_VERSION,
+      'schema',
+      versionId,
+      { id: versionId, ...versionData },
+      {
+        auditEntry: {
+          operator: versionData?.operator || '当前用户',
+          action: '发布方案版本',
+        },
+        ...options,
+      }
+    );
+  }, []);
+
+  const enqueueExecuteMigration = useCallback((migrationData, options = {}) => {
+    const migrationId = migrationData?.migrationId || `mig-${Date.now()}`;
+    return syncManager.enqueueOperation(
+      OPERATION_TYPES.EXECUTE_MIGRATION,
+      'schema',
+      migrationId,
+      { id: migrationId, ...migrationData },
+      {
+        auditEntry: {
+          operator: migrationData?.operator || '当前用户',
+          action: '执行版本迁移',
+        },
+        ...options,
+      }
+    );
+  }, []);
+
+  const enqueueRollbackMigration = useCallback((migrationData, options = {}) => {
+    const migrationId = migrationData?.migrationId || `rollback-${Date.now()}`;
+    return syncManager.enqueueOperation(
+      OPERATION_TYPES.ROLLBACK_MIGRATION,
+      'schema',
+      migrationId,
+      { id: migrationId, ...migrationData },
+      {
+        auditEntry: {
+          operator: migrationData?.operator || '当前用户',
+          action: '回滚版本迁移',
+        },
+        ...options,
+      }
+    );
+  }, []);
+
+  const getCurrentSchemaVersion = useCallback(() => syncManager.getCurrentSchemaVersion(), []);
+  const getSchemaVersionHistory = useCallback(() => syncManager.getSchemaVersionHistory(), []);
+  const getServerStats = useCallback(() => syncManager.getServerStats(), []);
+
   const startSync = useCallback(() => syncManager.startSync(), []);
   const resolveConflict = useCallback((conflictId, resolution, customMergeData) =>
     syncManager.resolveConflict(conflictId, resolution, customMergeData), []);
@@ -131,6 +186,12 @@ export function useSync() {
     enqueueDeviationUpdate,
     enqueueDeviationDelete,
     enqueueDeviationStatusUpdate,
+    enqueuePublishVersion,
+    enqueueExecuteMigration,
+    enqueueRollbackMigration,
+    getCurrentSchemaVersion,
+    getSchemaVersionHistory,
+    getServerStats,
     startSync,
     resolveConflict,
     retryOperation,

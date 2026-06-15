@@ -692,6 +692,28 @@ export class SyncManager {
     return serverMock.getStatistics();
   }
 
+  getCurrentSchemaVersion() {
+    const stats = serverMock.getStatistics();
+    return stats?.database?.schemaVersion || 0;
+  }
+
+  getSchemaVersionHistory() {
+    const allOps = serverMock.getAuditLog({ operationType: OPERATION_TYPES.PUBLISH_VERSION });
+    return allOps.map(op => ({
+      version: op.schemaVersion,
+      publishedAt: op.timestamp,
+      publishedBy: op.operator,
+      affectedCounts: op.affectedCounts,
+      details: op.schemaDetails,
+      summary: op.summary,
+      oldVersion: op.oldSchemaVersion,
+    }));
+  }
+
+  getServerStats() {
+    return serverMock.getStatistics();
+  }
+
   simulateServerConflict(entityType, entityId, modifierName) {
     const result = serverMock.simulateConcurrentModify(entityType, entityId, modifierName);
     if (result) {
