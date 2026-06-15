@@ -265,7 +265,7 @@ export class ServerMock {
     const serverEntity = store[entityId];
 
     if (!serverEntity) {
-      if (operation.data && operation.data._version === undefined) {
+      if (operation.forceRestore === true) {
         const now = new Date().toISOString();
         const entityData = this._clone(operation.data);
         entityData._version = 1;
@@ -274,13 +274,33 @@ export class ServerMock {
         entityData._updatedBy = auditEntry.operator;
         entityData._clientId = operation.clientId;
         store[entityId] = entityData;
-        auditEntry.action = `恢复并更新${this._getEntityTypeName(operation.entityType)}`;
+        auditEntry.action = `强制恢复${this._getEntityTypeName(operation.entityType)}`;
+        this._addAuditEntry({
+          ...auditEntry,
+          action: '强制恢复已删除实体',
+          detail: `通过 forceRestore 显式恢复已删除的 ${this._getEntityTypeName(operation.entityType)}`,
+          success: true,
+        });
         return {
           success: true,
           entityVersion: entityData._version,
           entityData: this._clone(entityData),
           syncedAt: now,
           fieldChanges: this._detectFieldChanges(null, operation.data),
+          forceRestored: true,
+        };
+      }
+
+      if (operation.beforeSnapshot && operation.beforeSnapshot._version) {
+        auditEntry.action = `冲突:删除后编辑`;
+        return {
+          success: false,
+          conflict: true,
+          conflictType: CONFLICT_TYPES.DELETE_THEN_EDIT,
+          conflictReason: '该记录已被其他终端在服务端删除。本地基于快照版本进行了编辑，需要确认是否恢复。',
+          baseVersion: operation.beforeSnapshot._version,
+          deletedSnapshot: this._clone(operation.beforeSnapshot),
+          localEdit: this._clone(operation.data),
         };
       }
 
@@ -288,7 +308,7 @@ export class ServerMock {
         success: false,
         conflict: true,
         conflictType: CONFLICT_TYPES.RECORD_NOT_FOUND,
-        conflictReason: '服务端未找到该记录，可能已被其他终端删除',
+        conflictReason: '服务端未找到该记录，可能已被其他终端删除，且缺少原始快照无法追踪。',
         serverVersion: null,
       };
     }
@@ -439,42 +459,176 @@ export class ServerMock {
   }
 
   async _handlePublishVersion(operation, auditEntry) {
-    this.db.meta.currentSchemaVersion = (this.db.meta.currentSchemaVersion || 0) + 1;
+    const oldVersion = this.db.meta.currentSchemaVersion || 0;
+    const newVersion = oldVersion + 1;
+    this.db.meta.currentSchemaVersion = newVersion;
+    this.db.meta.lastSchemaUpdateAt = new Date().toISOString();
+    this.db.meta.publishedBy = auditEntry.operator;
+    this.db.meta.schemaVersionDetails = operation.data || null;
+
+    const now = new Date().toISOString();
+    const affectedRecords = [];
+    const recordsWithVersion = newVersion;
+
+    const affectedCounts = { records: 0, deviations: 0, templates: 0, centers: 0 };
+
+    if (operation.data?.syncToRecords !== false) {
+      Object.values(this.db.records).forEach(r => {
+        r._schemaVersion = newVersion;
+        r._schemaUpdatedAt = now;
+        affectedCounts.records++;
+        affectedRecords.push({ id: r.id, subjectNo: r.subjectNo, visitName: r.visitName });
+      });
+      Object.values(this.db.deviations).forEach(d => {
+        d._schemaVersion = newVersion;
+        d._schemaUpdatedAt = now;
+        affectedCounts.deviations++;
+      });
+      Object.values(this.db.templates).forEach(t => {
+        t._schemaVersion = newVersion;
+        t._schemaUpdatedAt = now;
+        affectedCounts.templates++;
+      });
+      Object.values(this.db.centers).forEach(c => {
+        c._schemaVersion = newVersion;
+        c._schemaUpdatedAt = now;
+        affectedCounts.centers++;
+      });
+    }
+
     auditEntry.action = '发布方案版本';
-    auditEntry.summary = `版本 ${this.db.meta.currentSchemaVersion}`;
-    auditEntry.schemaVersion = this.db.meta.currentSchemaVersion;
+    auditEntry.summary = `版本 ${oldVersion} → ${newVersion}`;
+    auditEntry.schemaVersion = newVersion;
+    auditEntry.oldSchemaVersion = oldVersion;
+    auditEntry.affectedCounts = affectedCounts;
+    auditEntry.schemaDetails = operation.data || null;
 
     return {
       success: true,
-      entityVersion: this.db.meta.currentSchemaVersion,
-      entityData: { schemaVersion: this.db.meta.currentSchemaVersion },
-      syncedAt: new Date().toISOString(),
+      entityVersion: newVersion,
+      entityData: {
+        schemaVersion: newVersion,
+        oldSchemaVersion: oldVersion,
+        publishedAt: now,
+        publishedBy: auditEntry.operator,
+        affectedCounts,
+        affectedRecords: affectedRecords.slice(0, 10),
+        totalAffected: affectedCounts.records + affectedCounts.deviations + affectedCounts.templates + affectedCounts.centers,
+      },
+      syncedAt: now,
+      syncToRecords: operation.data?.syncToRecords !== false,
     };
   }
 
   async _handleExecuteMigration(operation, auditEntry) {
+    const beforeSchemaVersion = this.db.meta.currentSchemaVersion;
+    const migrationId = operation.data?.migrationId || `mig-${Date.now()}`;
+    const now = new Date().toISOString();
+
+    if (operation.data?.targetSchemaVersion) {
+      this.db.meta.currentSchemaVersion = operation.data.targetSchemaVersion;
+    }
+
+    this.db.meta.lastMigrationAt = now;
+    this.db.meta.lastMigrationId = migrationId;
+    if (!this.db.meta.migrationHistory) {
+      this.db.meta.migrationHistory = [];
+    }
+    this.db.meta.migrationHistory.push({
+      id: migrationId,
+      executedAt: now,
+      executedBy: auditEntry.operator,
+      beforeSchemaVersion,
+      afterSchemaVersion: this.db.meta.currentSchemaVersion,
+      details: operation.data || null,
+    });
+
+    if (operation.data?.recordMigrations && Array.isArray(operation.data.recordMigrations)) {
+      operation.data.recordMigrations.forEach(mig => {
+        const rec = this.db.records[mig.recordId];
+        if (rec) {
+          Object.assign(rec, mig.changes || {});
+          rec._schemaVersion = this.db.meta.currentSchemaVersion;
+          rec._schemaUpdatedAt = now;
+          rec._migratedAt = now;
+          rec._migrationId = migrationId;
+        }
+      });
+    }
+
     auditEntry.action = '执行版本迁移';
-    auditEntry.summary = operation.data?.migrationId || '未指定迁移ID';
+    auditEntry.summary = migrationId;
     auditEntry.migrationDetails = operation.data || null;
+    auditEntry.beforeSchemaVersion = beforeSchemaVersion;
+    auditEntry.afterSchemaVersion = this.db.meta.currentSchemaVersion;
 
     return {
       success: true,
       entityVersion: this.db.meta.currentSchemaVersion,
-      entityData: operation.data,
-      syncedAt: new Date().toISOString(),
+      entityData: {
+        migrationId,
+        beforeSchemaVersion,
+        afterSchemaVersion: this.db.meta.currentSchemaVersion,
+        executedAt: now,
+        recordMigrationCount: operation.data?.recordMigrations?.length || 0,
+      },
+      syncedAt: now,
     };
   }
 
   async _handleRollbackMigration(operation, auditEntry) {
+    const beforeSchemaVersion = this.db.meta.currentSchemaVersion;
+    const migrationId = operation.data?.migrationId || 'unknown';
+    const now = new Date().toISOString();
+
+    if (operation.data?.targetSchemaVersion) {
+      this.db.meta.currentSchemaVersion = operation.data.targetSchemaVersion;
+    }
+
+    this.db.meta.lastRollbackAt = now;
+    this.db.meta.lastRollbackMigrationId = migrationId;
+    if (!this.db.meta.rollbackHistory) {
+      this.db.meta.rollbackHistory = [];
+    }
+    this.db.meta.rollbackHistory.push({
+      id: migrationId,
+      rolledBackAt: now,
+      rolledBackBy: auditEntry.operator,
+      beforeSchemaVersion,
+      afterSchemaVersion: this.db.meta.currentSchemaVersion,
+      details: operation.data || null,
+    });
+
+    if (operation.data?.recordRollbacks && Array.isArray(operation.data.recordRollbacks)) {
+      operation.data.recordRollbacks.forEach(rb => {
+        const rec = this.db.records[rb.recordId];
+        if (rec) {
+          Object.assign(rec, rb.changes || {});
+          rec._schemaVersion = this.db.meta.currentSchemaVersion;
+          rec._schemaUpdatedAt = now;
+          rec._rolledBackAt = now;
+          rec._rollbackMigrationId = migrationId;
+        }
+      });
+    }
+
     auditEntry.action = '回滚版本迁移';
-    auditEntry.summary = operation.data?.migrationId || '未指定迁移ID';
+    auditEntry.summary = migrationId;
     auditEntry.migrationDetails = operation.data || null;
+    auditEntry.beforeSchemaVersion = beforeSchemaVersion;
+    auditEntry.afterSchemaVersion = this.db.meta.currentSchemaVersion;
 
     return {
       success: true,
       entityVersion: this.db.meta.currentSchemaVersion,
-      entityData: operation.data,
-      syncedAt: new Date().toISOString(),
+      entityData: {
+        migrationId,
+        beforeSchemaVersion,
+        afterSchemaVersion: this.db.meta.currentSchemaVersion,
+        rolledBackAt: now,
+        recordRollbackCount: operation.data?.recordRollbacks?.length || 0,
+      },
+      syncedAt: now,
     };
   }
 

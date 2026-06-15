@@ -376,16 +376,19 @@ export class SyncManager {
     operation.conflictInfo = {
       conflictType: serverResult.conflictType,
       conflictReason: serverResult.conflictReason,
-      serverVersion: serverResult.serverVersionData || serverResult.serverVersion,
+      serverVersionData: serverResult.serverVersionData || null,
+      serverVersionNumber: serverResult.serverVersion || null,
       baseVersion: serverResult.baseVersion,
-      serverVersion: serverResult.serverVersion,
       conflictFields: serverResult.conflictFields || null,
       modifiedFields: serverResult.modifiedFields || null,
+      deletedSnapshot: serverResult.deletedSnapshot || null,
+      localEdit: serverResult.localEdit || null,
       detectedAt: new Date().toISOString(),
     };
 
     const existingConflict = this.conflicts.find(c => c.operationId === operation.id);
     if (!existingConflict) {
+      const isDeleteThenEdit = serverResult.conflictType === CONFLICT_TYPES.DELETE_THEN_EDIT;
       const conflict = {
         id: uid(),
         operationId: operation.id,
@@ -395,16 +398,19 @@ export class SyncManager {
         conflictType: serverResult.conflictType,
         conflictReason: serverResult.conflictReason,
         localVersion: {
-          data: operation.data,
-          snapshot: operation.beforeSnapshot,
-          baseVersion: operation.baseVersion,
+          data: isDeleteThenEdit ? (serverResult.localEdit || operation.data) : operation.data,
+          snapshot: isDeleteThenEdit ? (serverResult.deletedSnapshot || operation.beforeSnapshot) : operation.beforeSnapshot,
+          baseVersion: serverResult.baseVersion || operation.baseVersion,
           updatedAt: operation.createdAt,
           clientId: this.clientId,
           timelineEntry: operation.timelineEntry || null,
         },
-        serverVersion: serverResult.serverVersionData || serverResult.serverVersion || null,
+        serverVersion: serverResult.serverVersionData || null,
+        serverVersionNumber: serverResult.serverVersion || null,
         conflictFields: serverResult.conflictFields || [],
         modifiedFields: serverResult.modifiedFields || [],
+        deletedSnapshot: serverResult.deletedSnapshot || null,
+        localEdit: serverResult.localEdit || null,
         status: 'pending',
         detectedAt: new Date().toISOString(),
         resolvedAt: null,
@@ -436,21 +442,34 @@ export class SyncManager {
     conflict.resolvedAt = new Date().toISOString();
     conflict.resolution = resolution;
 
+    const isDeleteThenEdit = conflict.conflictType === CONFLICT_TYPES.DELETE_THEN_EDIT;
+    const serverVersionData = conflict.serverVersion;
+    const serverVersion = serverVersionData?._version ?? conflict.serverVersionNumber;
+
     if (resolution === 'keep_local') {
       operation.status = OPERATION_STATUSES.PENDING;
       operation.conflictInfo = null;
       operation.retryCount = 0;
       operation.forced = true;
-      if (conflict.serverVersion && conflict.serverVersion._version) {
-        operation.data._version = conflict.serverVersion._version;
+      if (isDeleteThenEdit) {
+        operation.forceRestore = true;
+        delete operation.data._version;
+        conflict.resolutionDetail = 'forceRestore';
+      } else if (serverVersion) {
+        operation.data._version = serverVersion;
       }
     } else if (resolution === 'keep_server') {
       operation.status = OPERATION_STATUSES.SYNCED;
       operation.syncedAt = new Date().toISOString();
       operation.serverResponse = { discarded: true, resolution: 'keep_server' };
       conflict.serverApplied = true;
-      if (conflict.serverVersion) {
-        this.takeSnapshot(operation.entityType, operation.entityId, conflict.serverVersion);
+      if (serverVersionData) {
+        this.takeSnapshot(operation.entityType, operation.entityId, serverVersionData);
+      }
+      if (isDeleteThenEdit) {
+        conflict.resolutionDetail = 'acceptDelete';
+        operation.serverResponse.acceptedDelete = true;
+        this._removeSnapshot(operation.entityType, operation.entityId);
       }
     } else if (resolution === 'merge' && customMergeData) {
       operation.data = JSON.parse(JSON.stringify(customMergeData));
@@ -460,8 +479,12 @@ export class SyncManager {
       operation.merged = true;
       operation.forced = true;
       conflict.mergeResult = customMergeData;
-      if (conflict.serverVersion && conflict.serverVersion._version) {
-        operation.data._version = conflict.serverVersion._version;
+      if (isDeleteThenEdit) {
+        operation.forceRestore = true;
+        delete operation.data._version;
+        conflict.resolutionDetail = 'mergeAndRestore';
+      } else if (serverVersion) {
+        operation.data._version = serverVersion;
       }
     }
 
@@ -474,7 +497,8 @@ export class SyncManager {
       conflictId,
       operationId: operation.id,
       resolution,
-      detail: `冲突解决方式: ${this._getResolutionLabel(resolution)}`,
+      conflictType: conflict.conflictType,
+      detail: `冲突解决方式: ${this._getResolutionLabel(resolution)}${isDeleteThenEdit ? ' (删除后编辑场景)' : ''}`,
     });
 
     if (resolution !== 'keep_server') {
