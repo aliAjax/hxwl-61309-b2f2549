@@ -11,8 +11,6 @@ export function SchemaVersionManager({
   syncStatistics,
   serverAuditLog,
   enqueuePublishVersion,
-  enqueueExecuteMigration,
-  enqueueRollbackMigration,
   startSync,
   onClose,
 }) {
@@ -61,44 +59,11 @@ export function SchemaVersionManager({
   };
 
   const handleExecuteMigration = () => {
-    if (!migrationId.trim()) {
-      alert('请输入迁移ID');
-      return;
-    }
-    enqueueExecuteMigration({
-      migrationId: migrationId.trim(),
-      description: migrationDesc.trim(),
-      targetSchemaVersion: targetVersion ? Number(targetVersion) : undefined,
-      operator: operatorName.trim() || undefined,
-      recordMigrations: [],
-    });
-    setMigrationId('');
-    setMigrationDesc('');
-    setTargetVersion('');
-    if (navigator.onLine) {
-      startSync();
-    }
+    alert('请在主界面的“版本管理与迁移”页预览影响后执行迁移，以便同步真实访视变更和迁移快照。');
   };
 
   const handleRollbackMigration = () => {
-    if (!migrationId.trim()) {
-      alert('请输入要回滚的迁移ID');
-      return;
-    }
-    if (!confirm(`确定要回滚迁移「${migrationId}」吗？`)) return;
-    enqueueRollbackMigration({
-      migrationId: migrationId.trim(),
-      description: `回滚: ${migrationDesc.trim()}`,
-      targetSchemaVersion: targetVersion ? Number(targetVersion) : undefined,
-      operator: operatorName.trim() || undefined,
-      recordRollbacks: [],
-    });
-    setMigrationId('');
-    setMigrationDesc('');
-    setTargetVersion('');
-    if (navigator.onLine) {
-      startSync();
-    }
+    alert('请在主界面的“版本管理与迁移”页从具体迁移记录发起回滚，以便同步真实回滚明细和审计链路。');
   };
 
   const toggleVersionExpand = (v) => {
@@ -302,10 +267,10 @@ export function SchemaVersionManager({
                 <FileText size={14} />
                 <p>迁移操作说明：</p>
                 <ul>
-                  <li><strong>执行迁移</strong>：应用新的数据结构变更，可指定目标版本号</li>
-                  <li><strong>回滚迁移</strong>：撤销某次迁移操作，可指定回滚到的版本</li>
-                  <li>所有迁移操作都会完整记录到服务端审计日志</li>
-                  <li>支持按记录粒度的数据迁移（API 层面支持 recordMigrations / recordRollbacks）</li>
+                  <li><strong>执行迁移</strong>：请在主版本页完成影响预览和策略选择后发起</li>
+                  <li><strong>回滚迁移</strong>：请从主版本页的具体迁移记录发起</li>
+                  <li>主版本页会把真实访视变更、迁移快照和回滚明细加入同步队列</li>
+                  <li>同步成功后会完整记录到服务端审计日志</li>
                 </ul>
               </div>
 

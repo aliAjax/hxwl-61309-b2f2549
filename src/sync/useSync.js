@@ -91,7 +91,7 @@ export function useSync() {
   }, []);
 
   const enqueuePublishVersion = useCallback((versionData, options = {}) => {
-    const versionId = `v-${Date.now()}`;
+    const versionId = versionData?.id || `v-${Date.now()}`;
     return syncManager.enqueueOperation(
       OPERATION_TYPES.PUBLISH_VERSION,
       'schema',

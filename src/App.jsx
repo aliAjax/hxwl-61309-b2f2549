@@ -1339,6 +1339,129 @@ function App() {
     return timeB.localeCompare(timeA);
   }
 
+  function queueSchemaPublish(newVersion, template) {
+    sync.enqueuePublishVersion({
+      id: newVersion.id,
+      name: `${newVersion.templateName} ${newVersion.version}`,
+      description: `基于模板「${template?.name || newVersion.templateName}」发布`,
+      operator: newVersion.publishedBy,
+      syncToRecords: true,
+      appVersion: newVersion,
+      templateSnapshot: template ? { ...template, visits: (template.visits || []).map(v => ({ ...v })) } : null,
+      centerId: activeCenterId,
+    });
+  }
+
+  function buildRecordMigrations(snapshot, nextRecords, migrationRecord, version, prevVersion) {
+    const nextById = new Map(nextRecords.map(r => [r.id, r]));
+    const queuedIds = new Set();
+    const migrations = [];
+
+    snapshot.updatedRecords.forEach(upd => {
+      const after = nextById.get(upd.recordId);
+      if (!after) return;
+      queuedIds.add(upd.recordId);
+      migrations.push({
+        action: 'update',
+        recordId: upd.recordId,
+        before: snapshot.fullRecordSnapshots.find(s => s.id === upd.recordId) || null,
+        after,
+        changes: { ...after },
+        fieldChanges: upd.fieldChanges,
+      });
+    });
+
+    snapshot.cancelledRecords.forEach(cancelled => {
+      const after = nextById.get(cancelled.id);
+      if (!after) return;
+      queuedIds.add(cancelled.id);
+      migrations.push({
+        action: 'cancel',
+        recordId: cancelled.id,
+        before: snapshot.fullRecordSnapshots.find(s => s.id === cancelled.id) || null,
+        after,
+        changes: { ...after },
+      });
+    });
+
+    snapshot.addedRecordIds.forEach(recordId => {
+      const after = nextById.get(recordId);
+      if (!after) return;
+      queuedIds.add(recordId);
+      migrations.push({
+        action: 'add',
+        recordId,
+        before: null,
+        after,
+        changes: { ...after },
+      });
+    });
+
+    snapshot.fullRecordSnapshots.forEach(before => {
+      const after = nextById.get(before.id);
+      if (!after || queuedIds.has(before.id) || after.migrationOpId !== migrationRecord.id) return;
+      queuedIds.add(before.id);
+      migrations.push({
+        action: 'mark_pending',
+        recordId: before.id,
+        before,
+        after,
+        changes: { ...after },
+      });
+    });
+
+    return migrations.map(item => ({
+      ...item,
+      migrationId: migrationRecord.id,
+      versionId: version.id,
+      version: version.version,
+      prevVersion: prevVersion?.version || null,
+    }));
+  }
+
+  function buildRecordRollbacks(snapshot, nextRecords, migrationRecord, targetVersion) {
+    const nextById = new Map(nextRecords.map(r => [r.id, r]));
+    const originalById = new Map((snapshot.fullRecordSnapshots || []).map(s => [s.id, s]));
+    const rollbackIds = new Set([
+      ...(snapshot.updatedRecords || []).map(u => u.recordId),
+      ...(snapshot.deletedRecordIds || []),
+      ...(snapshot.fullRecordSnapshots || []).map(s => s.id),
+    ]);
+
+    const rollbacks = [];
+
+    (snapshot.addedRecordIds || []).forEach(recordId => {
+      rollbacks.push({
+        action: 'remove_added',
+        recordId,
+        before: { id: recordId },
+        after: null,
+        changes: {},
+      });
+    });
+
+    rollbackIds.forEach(recordId => {
+      const after = nextById.get(recordId);
+      const original = originalById.get(recordId);
+      if (!after || !original) return;
+      rollbacks.push({
+        action: 'restore',
+        recordId,
+        before: original,
+        after,
+        changes: { ...after },
+      });
+    });
+
+    return rollbacks.map(item => ({
+      ...item,
+      migrationId: migrationRecord.id,
+      versionId: targetVersion.id,
+      version: migrationRecord.version,
+      prevVersion: migrationRecord.prevVersion || null,
+    }));
+  }
+
   function publishVersion(templateId) {
     const tpl = templates.find(t => t.id === templateId);
     if (!tpl) return;
@@ -1358,6 +1481,7 @@ function App() {
     };
     const next = versions.map(v => v.templateId === templateId && v.isCurrent ? { ...v, isCurrent: false } : v);
     persistVersions([newVersion, ...next]);
+    queueSchemaPublish(newVersion, tpl);
     addAuditEntry({
       action: 'publish_version',
       target: newVersion.id,
@@ -1637,9 +1761,34 @@ function App() {
       migrations: [...(v.migrations || []), migrationRecord],
       lastMigration: v.id === ver.id ? migrationOpId : v.lastMigration,
     }));
+    const recordMigrations = buildRecordMigrations(snapshot, nextRecords, migrationRecord, ver, prevVersion);
 
     persist(nextRecords);
     persistVersions(nextVersions);
+    sync.enqueueExecuteMigration({
+      migrationId: migrationOpId,
+      description: `执行版本迁移 ${ver.templateName} ${prevVersion?.version || '首次'} → ${ver.version}`,
+      targetSchemaVersion: ver.versionNum,
+      operator: '操作员',
+      centerId: activeCenterId,
+      versionId: ver.id,
+      version: ver.version,
+      prevVersion: prevVersion?.version,
+      templateName: ver.templateName,
+      migrationRecord,
+      recordMigrations,
+      stats: {
+        updated: snapshot.updatedRecords.length,
+        added: addedCount,
+        cancelled: deletedCount,
+        total: changedCount,
+      },
+    });
+    nextRecords.forEach(r => {
+      if (r.migrationOpId === migrationOpId || snapshot.addedRecordIds.includes(r.id)) {
+        sync.takeSnapshot('record', r.id, r);
+      }
+    });
 
     snapshot.updatedRecords.forEach(upd => {
       upd.fieldChanges.forEach(fc => {
@@ -1910,9 +2059,40 @@ function App() {
         m.id === migrationId ? { ...m, rolledBack: true, rolledBackAt: rollbackTime, rolledBackBy: '操作员' } : m
       ),
     }));
+    const recordRollbacks = buildRecordRollbacks(snapshot, nextRecords, migrationRecord, targetVersion);
 
     persist(nextRecords);
     persistVersions(nextVersions);
+    sync.enqueueRollbackMigration({
+      migrationId,
+      description: `回滚版本迁移 ${migrationRecord.templateName} ${migrationRecord.version}`,
+      targetSchemaVersion: parseVersionNum(migrationRecord.prevVersion) || targetVersion.versionNum || undefined,
+      operator: '操作员',
+      centerId: activeCenterId,
+      versionId: targetVersion.id,
+      version: migrationRecord.version,
+      prevVersion: migrationRecord.prevVersion,
+      templateName: migrationRecord.templateName,
+      migrationRecord: {
+        ...migrationRecord,
+        rolledBack: true,
+        rolledBackAt: rollbackTime,
+        rolledBackBy: '操作员',
+      },
+      recordRollbacks,
+      stats: {
+        restoredUpdated: restoredUpdatedCount,
+        restoredCancelled: restoredCancelledCount,
+        removedAdded: removedNewCount,
+        restoredPending: restoredManualCount,
+        total: restoredCount,
+      },
+    });
+    nextRecords.forEach(r => {
+      if (recordRollbacks.some(rb => rb.recordId === r.id && rb.action !== 'remove_added')) {
+        sync.takeSnapshot('record', r.id, r);
+      }
+    });
 
     addAuditEntry({
       action: 'rollback_migration',

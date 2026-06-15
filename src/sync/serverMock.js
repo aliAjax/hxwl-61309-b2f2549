@@ -546,12 +546,25 @@ export class ServerMock {
     if (operation.data?.recordMigrations && Array.isArray(operation.data.recordMigrations)) {
       operation.data.recordMigrations.forEach(mig => {
         const rec = this.db.records[mig.recordId];
-        if (rec) {
+        if (mig.action === 'add' && mig.after) {
+          const entityData = this._clone(mig.after);
+          entityData._version = 1;
+          entityData._schemaVersion = this.db.meta.currentSchemaVersion;
+          entityData._schemaUpdatedAt = now;
+          entityData._migratedAt = now;
+          entityData._migrationId = migrationId;
+          entityData._updatedAt = now;
+          entityData._updatedBy = auditEntry.operator;
+          entityData._clientId = operation.clientId;
+          this.db.records[mig.recordId] = entityData;
+        } else if (rec) {
           Object.assign(rec, mig.changes || {});
           rec._schemaVersion = this.db.meta.currentSchemaVersion;
           rec._schemaUpdatedAt = now;
           rec._migratedAt = now;
           rec._migrationId = migrationId;
+          rec._updatedAt = now;
+          rec._updatedBy = auditEntry.operator;
         }
       });
     }
@@ -602,12 +615,16 @@ export class ServerMock {
     if (operation.data?.recordRollbacks && Array.isArray(operation.data.recordRollbacks)) {
       operation.data.recordRollbacks.forEach(rb => {
         const rec = this.db.records[rb.recordId];
-        if (rec) {
+        if (rb.action === 'remove_added') {
+          delete this.db.records[rb.recordId];
+        } else if (rec) {
           Object.assign(rec, rb.changes || {});
           rec._schemaVersion = this.db.meta.currentSchemaVersion;
           rec._schemaUpdatedAt = now;
           rec._rolledBackAt = now;
           rec._rollbackMigrationId = migrationId;
+          rec._updatedAt = now;
+          rec._updatedBy = auditEntry.operator;
         }
       });
     }
