@@ -590,6 +590,7 @@ function App() {
   });
   const [templateErrors, setTemplateErrors] = useState([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [previewEnrollDate, setPreviewEnrollDate] = useState(today);
 
   const [centers, setCenters] = useState(loadCenters);
   const [activeCenterId, setActiveCenterId] = useState('default');
@@ -975,6 +976,78 @@ function App() {
     if (validVisits.length === 0) return { items: [], max: 0 };
     const max = Math.max(...validVisits.map(v => Number(v.plannedDays) + Number(v.windowDays || 0)), 7);
     return { items: validVisits, max };
+  }, [templateForm.visits]);
+
+  const visitDatePreviews = useMemo(() => {
+    if (!previewEnrollDate) return {};
+    const result = {};
+    (templateForm.visits || []).forEach((v, idx) => {
+      const key = `visit_${idx}`;
+      const plannedDaysNum = v.plannedDays === '' || v.plannedDays === null || v.plannedDays === undefined ? null : Number(v.plannedDays);
+      const windowDaysNum = v.windowDays === '' || v.windowDays === null || v.windowDays === undefined ? null : Number(v.windowDays);
+      
+      const plannedDate = plannedDaysNum !== null && !isNaN(plannedDaysNum) ? addDays(previewEnrollDate, plannedDaysNum) : '';
+      const windowStart = (plannedDate && windowDaysNum !== null && !isNaN(windowDaysNum)) ? addDays(plannedDate, -windowDaysNum) : '';
+      const windowEnd = (plannedDate && windowDaysNum !== null && !isNaN(windowDaysNum)) ? addDays(plannedDate, windowDaysNum) : '';
+      
+      result[key] = {
+        plannedDate,
+        windowStart,
+        windowEnd,
+        plannedDaysNum,
+        windowDaysNum,
+      };
+    });
+    return result;
+  }, [templateForm.visits, previewEnrollDate]);
+
+  const visitPreviewWarnings = useMemo(() => {
+    const warnings = {};
+    const plannedDaysMap = new Map();
+    
+    (templateForm.visits || []).forEach((v, idx) => {
+      const key = `visit_${idx}`;
+      const visitWarnings = [];
+      
+      const plannedDaysStr = v.plannedDays;
+      const windowDaysStr = v.windowDays;
+      const plannedDaysNum = plannedDaysStr === '' || plannedDaysStr === null || plannedDaysStr === undefined ? null : Number(plannedDaysStr);
+      const windowDaysNum = windowDaysStr === '' || windowDaysStr === null || windowDaysStr === undefined ? null : Number(windowDaysStr);
+      
+      if (v.visitName) {
+        if (plannedDaysNum !== null) {
+          if (!plannedDaysMap.has(plannedDaysNum)) {
+            plannedDaysMap.set(plannedDaysNum, []);
+          }
+          plannedDaysMap.get(plannedDaysNum).push({ idx, name: v.visitName });
+        }
+      }
+      
+      if (windowDaysNum === null) {
+        if (v.visitName) {
+          visitWarnings.push({ type: 'window-empty', message: '窗口天数为空，建议设置访视窗口' });
+        }
+      } else if (windowDaysNum < 0) {
+        visitWarnings.push({ type: 'window-negative', message: '窗口天数为负数，不符合规范' });
+      }
+      
+      warnings[key] = visitWarnings;
+    });
+    
+    plannedDaysMap.forEach((visits, days) => {
+      if (visits.length > 1) {
+        visits.forEach(({ idx }) => {
+          const key = `visit_${idx}`;
+          const names = visits.map(v => v.name).join('、');
+          warnings[key].unshift({
+            type: 'days-duplicate',
+            message: `计划天数 D${days} 重复：${names}`,
+          });
+        });
+      }
+    });
+    
+    return warnings;
   }, [templateForm.visits]);
 
   const centerRecords = useMemo(() => {
@@ -2820,6 +2893,29 @@ function App() {
                   placeholder="例如：Ⅱ期临床标准访视方案"
                 />
               </label>
+              <label className="wide">
+                <span className="preview-label">
+                  <CalendarDays size={14} />模拟入组日期（用于日期预览）
+                </span>
+                <div className="preview-enroll-row">
+                  <input
+                    type="date"
+                    value={previewEnrollDate}
+                    onChange={(e) => setPreviewEnrollDate(e.target.value)}
+                    className="preview-date-input"
+                  />
+                  {previewEnrollDate && (
+                    <button type="button" className="link-btn small-btn" onClick={() => setPreviewEnrollDate(today)}>
+                      <RotateCcw size={12} />重置为今天
+                    </button>
+                  )}
+                </div>
+                {previewEnrollDate && (
+                  <p className="hint preview-hint">
+                    基于入组日期 <strong>{previewEnrollDate}</strong> 预览各访视的计划日期和窗口范围
+                  </p>
+                )}
+              </label>
             </div>
 
             <div className="visit-config-head">
@@ -2830,54 +2926,89 @@ function App() {
             </div>
 
             <div className="visit-rows">
-              {templateForm.visits.map((v, idx) => (
-                <div className="visit-row" key={idx}>
-                  <div className="visit-row-grid">
-                    <label>
-                      <span>访视名称</span>
-                      <input
-                        type="text"
-                        value={v.visitName}
-                        onChange={(e) => updateVisitField(idx, 'visitName', e.target.value)}
-                        placeholder="V1"
-                      />
-                    </label>
-                    <label>
-                      <span>计划天数（相对入组日）</span>
-                      <input
-                        type="number"
-                        min="0"
-                        value={v.plannedDays}
-                        onChange={(e) => updateVisitField(idx, 'plannedDays', e.target.value)}
-                        placeholder="0"
-                      />
-                    </label>
-                    <label>
-                      <span>允许窗口（±天）</span>
-                      <input
-                        type="number"
-                        min="0"
-                        value={v.windowDays}
-                        onChange={(e) => updateVisitField(idx, 'windowDays', e.target.value)}
-                        placeholder="3"
-                      />
-                    </label>
-                    <label className="wide">
-                      <span>检查项目</span>
-                      <textarea
-                        value={v.items}
-                        onChange={(e) => updateVisitField(idx, 'items', e.target.value)}
-                        placeholder="生命体征、血常规..."
-                      />
-                    </label>
+              {templateForm.visits.map((v, idx) => {
+                const key = `visit_${idx}`;
+                const preview = visitDatePreviews[key] || {};
+                const warnings = visitPreviewWarnings[key] || [];
+                const hasWarnings = warnings.length > 0;
+                return (
+                  <div className={`visit-row ${hasWarnings ? 'visit-row-warn' : ''}`} key={idx}>
+                    <div className="visit-row-grid">
+                      <label>
+                        <span>访视名称</span>
+                        <input
+                          type="text"
+                          value={v.visitName}
+                          onChange={(e) => updateVisitField(idx, 'visitName', e.target.value)}
+                          placeholder="V1"
+                        />
+                      </label>
+                      <label>
+                        <span>计划天数（相对入组日）</span>
+                        <input
+                          type="number"
+                          min="0"
+                          value={v.plannedDays}
+                          onChange={(e) => updateVisitField(idx, 'plannedDays', e.target.value)}
+                          placeholder="0"
+                          className={warnings.some(w => w.type === 'days-duplicate') ? 'input-warn' : ''}
+                        />
+                      </label>
+                      <label>
+                        <span>允许窗口（±天）</span>
+                        <input
+                          type="number"
+                          min="0"
+                          value={v.windowDays}
+                          onChange={(e) => updateVisitField(idx, 'windowDays', e.target.value)}
+                          placeholder="3"
+                          className={warnings.some(w => w.type === 'window-empty' || w.type === 'window-negative') ? 'input-warn' : ''}
+                        />
+                      </label>
+                      <label className="wide">
+                        <span>检查项目</span>
+                        <textarea
+                          value={v.items}
+                          onChange={(e) => updateVisitField(idx, 'items', e.target.value)}
+                          placeholder="生命体征、血常规..."
+                        />
+                      </label>
+                    </div>
+                    {previewEnrollDate && (preview.plannedDate || preview.windowStart || preview.windowEnd) && (
+                      <div className="visit-date-preview">
+                        <CalendarDays size={14} className="preview-icon" />
+                        <div className="preview-items">
+                          {preview.plannedDate && (
+                            <span className="preview-item preview-item-planned">
+                              <strong>计划日期：</strong>{preview.plannedDate}
+                            </span>
+                          )}
+                          {preview.windowStart && (
+                            <span className="preview-item preview-item-window">
+                              <strong>窗口：</strong>{preview.windowStart} ~ {preview.windowEnd}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {hasWarnings && (
+                      <div className="visit-warnings">
+                        {warnings.map((w, wi) => (
+                          <div key={wi} className={`visit-warning visit-warning-${w.type}`}>
+                            <AlertCircle size={12} />
+                            <span>{w.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {templateForm.visits.length > 1 && (
+                      <button type="button" className="remove-visit" onClick={() => removeVisitRow(idx)} title="删除此行">
+                        <X size={14} />
+                      </button>
+                    )}
                   </div>
-                  {templateForm.visits.length > 1 && (
-                    <button type="button" className="remove-visit" onClick={() => removeVisitRow(idx)} title="删除此行">
-                      <X size={14} />
-                    </button>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             {templateErrors.length > 0 && (
@@ -2893,15 +3024,20 @@ function App() {
               <div className="panel-title" style={{ marginBottom: 10 }}>
                 <Eye size={18} />
                 <h3>时间轴预览（入组日=D0）</h3>
+                {previewEnrollDate && (
+                  <span className="timeline-enroll-date">
+                    <CalendarDays size={14} />入组日：{previewEnrollDate}
+                  </span>
+                )}
               </div>
               {previewTimeline.items.length > 0 ? (
                 <div className="timeline-preview">
                   <div className="timeline-scale">
-                    <span>D0</span>
-                    <span style={{ left: `${Math.min(25, 100 * 7 / (previewTimeline.max || 1))}%` }}>D7</span>
-                    <span style={{ left: `${Math.min(50, 100 * 14 / (previewTimeline.max || 1))}%` }}>D14</span>
-                    <span style={{ left: `${Math.min(75, 100 * 21 / (previewTimeline.max || 1))}%` }}>D21</span>
-                    <span style={{ right: 0 }}>D{previewTimeline.max}</span>
+                    <span>D0{previewEnrollDate ? ` (${previewEnrollDate})` : ''}</span>
+                    <span style={{ left: `${Math.min(25, 100 * 7 / (previewTimeline.max || 1))}%` }}>D7{previewEnrollDate ? ` (${addDays(previewEnrollDate, 7)})` : ''}</span>
+                    <span style={{ left: `${Math.min(50, 100 * 14 / (previewTimeline.max || 1))}%` }}>D14{previewEnrollDate ? ` (${addDays(previewEnrollDate, 14)})` : ''}</span>
+                    <span style={{ left: `${Math.min(75, 100 * 21 / (previewTimeline.max || 1))}%` }}>D21{previewEnrollDate ? ` (${addDays(previewEnrollDate, 21)})` : ''}</span>
+                    <span style={{ right: 0 }}>D{previewTimeline.max}{previewEnrollDate ? ` (${addDays(previewEnrollDate, previewTimeline.max)})` : ''}</span>
                   </div>
                   <div className="timeline-track">
                     <div className="timeline-line" />
@@ -2910,17 +3046,29 @@ function App() {
                       const windowPct = previewTimeline.max > 0 ? (Number(v.windowDays || 0) / previewTimeline.max) * 100 : 0;
                       const left = Math.max(0, pos - windowPct);
                       const width = Math.min(100 - left, windowPct * 2 || 1.5);
+                      const plannedDate = previewEnrollDate ? addDays(previewEnrollDate, v.plannedDays) : '';
+                      const windowDaysNum = Number(v.windowDays || 0);
+                      const windowStart = (plannedDate && windowDaysNum > 0) ? addDays(plannedDate, -windowDaysNum) : '';
+                      const windowEnd = (plannedDate && windowDaysNum > 0) ? addDays(plannedDate, windowDaysNum) : '';
+                      const hasDate = !!plannedDate;
                       return (
                         <div
                           key={i}
                           className="timeline-marker"
                           style={{ left: `${left}%`, width: `${width}%` }}
-                          title={`${v.visitName} · D${v.plannedDays} ±${v.windowDays || 0}天`}
+                          title={hasDate 
+                            ? `${v.visitName} · 计划${plannedDate}${windowStart ? ` · 窗口${windowStart}~${windowEnd}` : ''}` 
+                            : `${v.visitName} · D${v.plannedDays} ±${v.windowDays || 0}天`}
                         >
                           <div className="timeline-dot" />
                           <div className="timeline-label">
                             <strong>{v.visitName}</strong>
                             <span>D{Number(v.plannedDays)} ±{Number(v.windowDays || 0)}d</span>
+                            {hasDate && (
+                              <span className="timeline-date">
+                                计划：{plannedDate}{windowStart && <>, 窗口: {windowStart}~{windowEnd}</>}
+                              </span>
+                            )}
                             {v.items && <em>{v.items.length > 18 ? v.items.slice(0, 18) + '…' : v.items}</em>}
                           </div>
                         </div>
