@@ -2736,6 +2736,40 @@ textarea { min-height: 76px; resize: vertical; }
   color: #b91c1c;
 }
 
+.dev-stat.overdue > svg {
+  background: #fecaca;
+  color: #991b1b;
+}
+
+.dev-stat.overdue.has-overdue {
+  border-color: #f87171;
+  background: linear-gradient(135deg, #fef2f2 0%, #fff 100%);
+  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.15);
+}
+
+.dev-stat.overdue.has-overdue > svg {
+  background: #fecaca;
+  color: #991b1b;
+}
+
+.dev-stat.overdue.has-overdue strong {
+  color: #b91c1c;
+}
+
+.dev-stat.overdue.has-overdue span {
+  color: #991b1b;
+}
+
+.dev-stat-badge {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+}
+
 .dev-toolbar {
   display: flex;
   gap: 10px;
@@ -2904,6 +2938,45 @@ textarea { min-height: 76px; resize: vertical; }
 .dev-card.dev-sev-moderate { border-left-color: #f59e0b; }
 .dev-card.dev-sev-severe { border-left-color: #ef4444; }
 .dev-card.dev-sev-critical { border-left-color: #7c1d6f; }
+
+.dev-card.dev-card-overdue {
+  border-color: #fca5a5;
+  background: linear-gradient(135deg, #fff1f2 0%, #ffffff 100%);
+  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.15);
+}
+
+.dev-card.dev-card-overdue:hover {
+  border-color: #f87171;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.2);
+}
+
+.dev-card.dev-card-overdue.selected {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.3);
+}
+
+.dev-overdue-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: #b91c1c;
+  animation: overdue-pulse 2s ease-in-out infinite;
+}
+
+@keyframes overdue-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.dev-overdue-days {
+  color: #dc2626;
+  font-weight: 600;
+}
 
 .dev-card-head {
   display: flex;
@@ -3116,6 +3189,34 @@ textarea { min-height: 76px; resize: vertical; }
   line-height: 1.5;
   margin: 0;
   word-break: break-word;
+}
+
+.dev-detail-overdue.is-overdue {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.dev-detail-overdue.is-overdue label {
+  color: #b91c1c;
+}
+
+.dev-detail-overdue.is-overdue p {
+  color: #b91c1c;
+  font-weight: 700;
+}
+
+.dev-overdue-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: #b91c1c;
+  margin-left: 8px;
+  animation: overdue-pulse 2s ease-in-out infinite;
 }
 
 .dev-detail-section {

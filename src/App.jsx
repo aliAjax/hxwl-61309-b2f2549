@@ -565,6 +565,23 @@ function devStatusLabel(key) {
   return DEVIATION_STATUSES.find(s => s.key === key)?.label || key;
 }
 
+const OVERDUE_DAYS_THRESHOLD = 7;
+
+function getOverdueDays(deviation) {
+  if (!deviation || deviation.status === 'closed') return 0;
+  const reportedAt = deviation.reportedAt;
+  if (!reportedAt) return 0;
+  const reportDate = new Date(reportedAt);
+  const now = new Date(today);
+  const diffTime = now.getTime() - reportDate.getTime();
+  const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+  return diffDays;
+}
+
+function isOverdue(deviation) {
+  return getOverdueDays(deviation) > OVERDUE_DAYS_THRESHOLD;
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -601,7 +618,7 @@ function App() {
     id: '', subjectNo: '', visitName: '', group: '', severity: 'mild', type: '其他',
     status: 'pending', title: '', description: '', reportedBy: '', resolution: '', sourceRecordId: '',
   });
-  const [devFilters, setDevFilters] = useState({ query: '', severity: '全部', type: '全部' });
+  const [devFilters, setDevFilters] = useState({ query: '', severity: '全部', type: '全部', overdue: '全部' });
   const [selectedDev, setSelectedDev] = useState(null);
 
   const [exportFilters, setExportFilters] = useState({
@@ -1140,7 +1157,8 @@ function App() {
     return centerDeviations
       .filter(d => !devFilters.query || `${d.subjectNo}${d.visitName}${d.title}${d.description}`.includes(devFilters.query))
       .filter(d => devFilters.severity === '全部' || d.severity === devFilters.severity)
-      .filter(d => devFilters.type === '全部' || d.type === devFilters.type);
+      .filter(d => devFilters.type === '全部' || d.type === devFilters.type)
+      .filter(d => devFilters.overdue === '全部' || (devFilters.overdue === 'overdue' && isOverdue(d)) || (devFilters.overdue === 'normal' && !isOverdue(d)));
   }, [centerDeviations, devFilters]);
 
   const devStats = useMemo(() => {
@@ -1151,10 +1169,7 @@ function App() {
       investigating: cd.filter(d => d.status === 'investigating').length,
       closed: cd.filter(d => d.status === 'closed').length,
       critical: cd.filter(d => d.severity === 'severe' || d.severity === 'critical').length,
-      overdue: cd.filter(d => d.status !== 'closed').filter(d => {
-        const days = Math.floor((Date.now() - new Date(d.reportedAt || today).getTime()) / (1000 * 60 * 60 * 24));
-        return days > 7;
-      }).length,
+      overdue: cd.filter(d => isOverdue(d)).length,
     };
   }, [centerDeviations]);
 
@@ -2579,12 +2594,17 @@ function App() {
                   <strong>{devStats.critical}</strong>
                 </div>
               </div>
-              <div className="dev-stat" style={devStats.overdue > 0 ? { borderColor: '#fecaca', background: '#fef2f2' } : {}}>
+              <div
+                className={`dev-stat overdue ${devStats.overdue > 0 ? 'has-overdue' : ''}`}
+                onClick={() => setDevFilters(f => ({ ...f, overdue: f.overdue === 'overdue' ? '全部' : 'overdue' }))}
+                style={{ cursor: 'pointer' }}
+              >
                 <AlertTriangle size={16} />
                 <div>
-                  <span>超7天未关闭</span>
-                  <strong style={devStats.overdue > 0 ? { color: '#be123c' } : {}}>{devStats.overdue}</strong>
+                  <span>逾期未关闭（{OVERDUE_DAYS_THRESHOLD}天）</span>
+                  <strong>{devStats.overdue}</strong>
                 </div>
+                {devFilters.overdue === 'overdue' && <div className="dev-stat-badge">已筛选</div>}
               </div>
             </div>
             <div className="dev-toolbar">
@@ -2629,6 +2649,23 @@ function App() {
                   <option value="全部">全部类型</option>
                   {DEVIATION_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                 </select>
+              </div>
+              <div className="dev-filter-row" style={{ marginTop: 10 }}>
+                <select value={devFilters.overdue} onChange={(e) => setDevFilters({ ...devFilters, overdue: e.target.value })}>
+                  <option value="全部">全部逾期状态</option>
+                  <option value="overdue">逾期未关闭</option>
+                  <option value="normal">正常处理中</option>
+                </select>
+                {devFilters.overdue !== '全部' && (
+                  <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => setDevFilters(f => ({ ...f, overdue: '全部' }))}
+                    style={{ marginTop: 6 }}
+                  >
+                    <X size={12} />清除逾期筛选
+                  </button>
+                )}
               </div>
             </div>
 
@@ -2726,15 +2763,22 @@ function App() {
                     {(devKanbanCols[s.key] || []).map(d => {
                       const sevMeta = severityMeta(d.severity);
                       const sourceRec = records.find(r => r.id === d.sourceRecordId);
+                      const overdueDays = getOverdueDays(d);
+                      const overdue = isOverdue(d);
                       return (
                         <article
-                          className={`dev-card ${severityClass(d.severity)} ${selectedDev?.id === d.id ? 'selected' : ''}`}
+                          className={`dev-card ${severityClass(d.severity)} ${selectedDev?.id === d.id ? 'selected' : ''} ${overdue ? 'dev-card-overdue' : ''}`}
                           key={d.id}
                           onClick={() => setSelectedDev(d)}
                         >
                           <div className="dev-card-head">
                             <span className={`dev-severity ${severityClass(d.severity)}`}>{sevMeta.label}</span>
                             <span className="dev-type-tag">{d.type}</span>
+                            {overdue && (
+                              <span className="dev-overdue-badge">
+                                <AlertTriangle size={10} />逾期{overdueDays}天
+                              </span>
+                            )}
                           </div>
                           <div className="dev-card-title">
                             <strong>{d.title}</strong>
@@ -2743,7 +2787,7 @@ function App() {
                           <p className="dev-card-desc">{d.description || '（无详细描述）'}</p>
                           <div className="dev-card-meta">
                             <span><UserCircle size={12} />{d.subjectNo}{d.visitName ? ` · ${d.visitName}` : ''}</span>
-                            <span><Clock size={12} />{d.reportedAt || '-'}</span>
+                            <span><Clock size={12} />{d.reportedAt || '-'}{overdue && <span className="dev-overdue-days"> · 待处理{overdueDays}天</span>}</span>
                           </div>
                           {d.reportedBy && (
                             <div className="dev-card-source"><User size={12} />{d.reportedBy}</div>
@@ -2818,6 +2862,15 @@ function App() {
                     <label>受试者</label>
                     <p>{selectedDev.subjectNo}{selectedDev.visitName ? ` / ${selectedDev.visitName}` : ''}</p>
                   </div>
+                  {selectedDev.status !== 'closed' && (
+                    <div className={`dev-detail-item dev-detail-overdue ${isOverdue(selectedDev) ? 'is-overdue' : ''}`}>
+                      <label>待处理天数</label>
+                      <p>
+                        {getOverdueDays(selectedDev)} 天
+                        {isOverdue(selectedDev) && <span className="dev-overdue-tag">已逾期</span>}
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="dev-detail-section">
