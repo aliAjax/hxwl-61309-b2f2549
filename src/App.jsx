@@ -974,7 +974,7 @@ function App() {
       .filter(v => v.visitName && v.plannedDays !== '' && v.plannedDays !== null && v.plannedDays !== undefined)
       .sort((a, b) => Number(a.plannedDays) - Number(b.plannedDays));
     if (validVisits.length === 0) return { items: [], max: 0 };
-    const max = Math.max(...validVisits.map(v => Number(v.plannedDays) + Number(v.windowDays || 0)), 7);
+    const max = Math.max(...validVisits.map(v => Number(v.plannedDays) + Math.max(0, Number(v.windowDays || 0))), 7);
     return { items: validVisits, max };
   }, [templateForm.visits]);
 
@@ -987,8 +987,9 @@ function App() {
       const windowDaysNum = v.windowDays === '' || v.windowDays === null || v.windowDays === undefined ? null : Number(v.windowDays);
       
       const plannedDate = plannedDaysNum !== null && !isNaN(plannedDaysNum) ? addDays(previewEnrollDate, plannedDaysNum) : '';
-      const windowStart = (plannedDate && windowDaysNum !== null && !isNaN(windowDaysNum)) ? addDays(plannedDate, -windowDaysNum) : '';
-      const windowEnd = (plannedDate && windowDaysNum !== null && !isNaN(windowDaysNum)) ? addDays(plannedDate, windowDaysNum) : '';
+      const isValidWindow = windowDaysNum !== null && !isNaN(windowDaysNum) && windowDaysNum >= 0;
+      const windowStart = (plannedDate && isValidWindow) ? addDays(plannedDate, -windowDaysNum) : '';
+      const windowEnd = (plannedDate && isValidWindow) ? addDays(plannedDate, windowDaysNum) : '';
       
       result[key] = {
         plannedDate,
@@ -3043,11 +3044,13 @@ function App() {
                     <div className="timeline-line" />
                     {previewTimeline.items.map((v, i) => {
                       const pos = previewTimeline.max > 0 ? (Number(v.plannedDays) / previewTimeline.max) * 100 : 0;
-                      const windowPct = previewTimeline.max > 0 ? (Number(v.windowDays || 0) / previewTimeline.max) * 100 : 0;
+                      const windowDaysRaw = Number(v.windowDays || 0);
+                      const validWindowDays = windowDaysRaw >= 0 ? windowDaysRaw : 0;
+                      const windowPct = previewTimeline.max > 0 ? (validWindowDays / previewTimeline.max) * 100 : 0;
                       const left = Math.max(0, pos - windowPct);
                       const width = Math.min(100 - left, windowPct * 2 || 1.5);
                       const plannedDate = previewEnrollDate ? addDays(previewEnrollDate, v.plannedDays) : '';
-                      const windowDaysNum = Number(v.windowDays || 0);
+                      const windowDaysNum = windowDaysRaw;
                       const windowStart = (plannedDate && windowDaysNum > 0) ? addDays(plannedDate, -windowDaysNum) : '';
                       const windowEnd = (plannedDate && windowDaysNum > 0) ? addDays(plannedDate, windowDaysNum) : '';
                       const hasDate = !!plannedDate;
