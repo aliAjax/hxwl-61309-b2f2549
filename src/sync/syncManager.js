@@ -1,4 +1,5 @@
 import { OPERATION_TYPES, OPERATION_STATUSES, CONFLICT_TYPES, SYNC_STATUSES, STORAGE_KEYS } from './types';
+import { serverMock } from './serverMock';
 
 function uid() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -35,14 +36,29 @@ function saveToStorage(key, value) {
   }
 }
 
+const CLIENT_AUDIT_KEY = 'hxwl-61309-client-audit';
+
+function loadClientAuditLog() {
+  return loadFromStorage(CLIENT_AUDIT_KEY, []);
+}
+
+function saveClientAuditLog(log) {
+  if (log.length > 10000) {
+    log = log.slice(-5000);
+  }
+  saveToStorage(CLIENT_AUDIT_KEY, log);
+}
+
 export class SyncManager {
   constructor() {
     this.listeners = new Set();
     this.operationQueue = loadFromStorage(STORAGE_KEYS.OPERATION_QUEUE, []);
     this.conflicts = loadFromStorage(STORAGE_KEYS.CONFLICTS, []);
     this.entitySnapshots = loadFromStorage(STORAGE_KEYS.ENTITY_SNAPSHOTS, {});
+    this.clientAuditLog = loadClientAuditLog();
     this.syncStatus = typeof navigator !== 'undefined' && navigator.onLine ? SYNC_STATUSES.ONLINE : SYNC_STATUSES.OFFLINE;
     this.lastSyncTime = loadFromStorage(STORAGE_KEYS.LAST_SYNC_TIME, null);
+    this.lastPullTime = loadFromStorage('hxwl-61309-last-pull', null);
     this.clientId = getClientId();
     this.syncing = false;
     this.retryTimer = null;
@@ -53,11 +69,19 @@ export class SyncManager {
     if (typeof window === 'undefined') return;
     window.addEventListener('online', () => {
       this._updateSyncStatus(SYNC_STATUSES.ONLINE);
+      this._addClientAuditEntry({
+        action: '网络恢复',
+        detail: '检测到网络连接恢复，开始自动同步',
+      });
       this.startSync();
     });
     window.addEventListener('offline', () => {
       this._updateSyncStatus(SYNC_STATUSES.OFFLINE);
       this._clearRetryTimer();
+      this._addClientAuditEntry({
+        action: '网络断开',
+        detail: '检测到网络连接断开，切换到离线模式',
+      });
     });
   }
 
@@ -96,6 +120,22 @@ export class SyncManager {
     saveToStorage(STORAGE_KEYS.LAST_SYNC_TIME, this.lastSyncTime);
   }
 
+  _persistClientAudit() {
+    saveClientAuditLog(this.clientAuditLog);
+  }
+
+  _addClientAuditEntry(entry) {
+    const fullEntry = {
+      id: uid(),
+      timestamp: new Date().toISOString(),
+      clientId: this.clientId,
+      ...entry,
+    };
+    this.clientAuditLog.push(fullEntry);
+    this._persistClientAudit();
+    return fullEntry;
+  }
+
   subscribe(listener) {
     this.listeners.add(listener);
     listener(this.getState());
@@ -112,6 +152,7 @@ export class SyncManager {
       operationQueue: [...this.operationQueue],
       conflicts: [...this.conflicts],
       clientId: this.clientId,
+      clientAuditLog: [...this.clientAuditLog],
     };
   }
 
@@ -123,6 +164,7 @@ export class SyncManager {
       data: JSON.parse(JSON.stringify(entityData)),
       timestamp: new Date().toISOString(),
       clientId: this.clientId,
+      version: entityData?._version ?? null,
     };
     this._persistSnapshots();
   }
@@ -132,14 +174,22 @@ export class SyncManager {
     return this.entitySnapshots[key] || null;
   }
 
+  getEntityVersion(entityType, entityId) {
+    const snapshot = this.getSnapshot(entityType, entityId);
+    return snapshot?.data?._version ?? snapshot?.version ?? null;
+  }
+
   enqueueOperation(type, entityType, entityId, data, options = {}) {
+    const beforeSnapshot = options.beforeSnapshot || this.getSnapshot(entityType, entityId)?.data || null;
+
     const operation = {
       id: uid(),
       type,
       entityType,
       entityId,
       data: JSON.parse(JSON.stringify(data)),
-      beforeSnapshot: options.beforeSnapshot || this.getSnapshot(entityType, entityId)?.data || null,
+      beforeSnapshot: beforeSnapshot ? JSON.parse(JSON.stringify(beforeSnapshot)) : null,
+      baseVersion: beforeSnapshot?._version ?? data?._version ?? null,
       status: OPERATION_STATUSES.PENDING,
       createdAt: new Date().toISOString(),
       clientId: this.clientId,
@@ -147,6 +197,7 @@ export class SyncManager {
       lastError: null,
       conflictInfo: null,
       order: this.operationQueue.length,
+      forced: options.forced || false,
     };
 
     if (options.timelineEntry) {
@@ -159,6 +210,16 @@ export class SyncManager {
     this.operationQueue.push(operation);
     this._persistQueue();
     this._notifyListeners();
+
+    this._addClientAuditEntry({
+      action: '操作入队',
+      operationId: operation.id,
+      operationType: type,
+      entityType,
+      entityId,
+      baseVersion: operation.baseVersion,
+      detail: `${this.getOperationDescription(operation)}`,
+    });
 
     if (this.syncStatus === SYNC_STATUSES.ONLINE) {
       this.startSync();
@@ -186,6 +247,11 @@ export class SyncManager {
 
     pendingOps.sort((a, b) => a.order - b.order);
 
+    this._addClientAuditEntry({
+      action: '开始同步',
+      detail: `开始同步 ${pendingOps.length} 个待处理操作`,
+    });
+
     for (const op of pendingOps) {
       await this._syncOneOperation(op);
     }
@@ -196,13 +262,25 @@ export class SyncManager {
 
     if (hasConflicts) {
       this._updateSyncStatus(SYNC_STATUSES.ERROR);
+      this._addClientAuditEntry({
+        action: '同步完成（存在冲突',
+        detail: `同步完成，但存在 ${this.conflicts.length} 个冲突需要人工处理`,
+      });
     } else if (hasFailed) {
       this._updateSyncStatus(SYNC_STATUSES.ERROR);
+      this._addClientAuditEntry({
+        action: '同步完成（存在失败',
+        detail: `同步完成，存在失败操作，已安排自动重试`,
+      });
       this._scheduleRetry();
     } else {
       this._updateSyncStatus(SYNC_STATUSES.ONLINE);
       this.lastSyncTime = new Date().toISOString();
       this._persistLastSync();
+      this._addClientAuditEntry({
+        action: '同步完成（成功',
+        detail: '所有操作同步成功',
+      });
     }
 
     this._notifyListeners();
@@ -216,6 +294,11 @@ export class SyncManager {
     const minRetry = Math.min(...failedOps.map(op => op.retryCount));
     const delay = Math.min(1000 * Math.pow(2, minRetry), 60000);
 
+    this._addClientAuditEntry({
+      action: '安排自动重试',
+      detail: `${Math.round(delay / 1000)} 秒后重试 ${failedOps.length} 个失败操作`,
+    });
+
     this.retryTimer = setTimeout(() => {
       if (this.syncStatus !== SYNC_STATUSES.OFFLINE) {
         this.startSync();
@@ -228,8 +311,17 @@ export class SyncManager {
     this._persistQueue();
     this._notifyListeners();
 
+    this._addClientAuditEntry({
+      action: '开始同步单个操作',
+      operationId: operation.id,
+      operationType: operation.type,
+      entityType: operation.entityType,
+      entityId: operation.entityId,
+      baseVersion: operation.baseVersion,
+    });
+
     try {
-      const serverResult = await this._callServerAPI(operation);
+      const serverResult = await serverMock.executeOperation(operation);
 
       if (serverResult && serverResult.conflict) {
         this._handleConflict(operation, serverResult);
@@ -240,11 +332,21 @@ export class SyncManager {
       operation.syncedAt = new Date().toISOString();
       operation.serverResponse = serverResult || null;
 
-      if (serverResult && serverResult.entityVersion) {
+      if (serverResult && serverResult.entityData) {
         this.takeSnapshot(operation.entityType, operation.entityId, serverResult.entityData);
+      } else if (operation.type.includes('DELETE') || operation.type.includes('delete')) {
+        this._removeSnapshot(operation.entityType, operation.entityId);
       }
 
       this._persistQueue();
+
+      this._addClientAuditEntry({
+        action: '操作同步成功',
+        operationId: operation.id,
+        entityVersion: serverResult?.entityVersion,
+        fieldChangeCount: serverResult?.fieldChanges?.length || 0,
+      });
+
     } catch (error) {
       operation.status = OPERATION_STATUSES.FAILED;
       operation.retryCount = (operation.retryCount || 0) + 1;
@@ -253,39 +355,32 @@ export class SyncManager {
         timestamp: new Date().toISOString(),
       };
       this._persistQueue();
+
+      this._addClientAuditEntry({
+        action: '操作同步失败',
+        operationId: operation.id,
+        errorMessage: error.message,
+        retryCount: operation.retryCount,
+      });
     }
   }
 
-  async _callServerAPI(operation) {
-    await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200));
-
-    const shouldSimulateConflict = Math.random() < 0.05;
-    if (shouldSimulateConflict && operation.type === OPERATION_TYPES.UPDATE_RECORD) {
-      return {
-        conflict: true,
-        conflictType: CONFLICT_TYPES.CONCURRENT_MODIFY,
-        serverVersion: {
-          ...operation.data,
-          status: Math.random() > 0.5 ? '已完成' : '窗口内',
-          updatedAt: new Date(Date.now() - 3600000).toISOString(),
-          updatedBy: '另一位操作员',
-        },
-      };
-    }
-
-    return {
-      success: true,
-      entityVersion: operation.id,
-      entityData: operation.data,
-      syncedAt: new Date().toISOString(),
-    };
+  _removeSnapshot(entityType, entityId) {
+    const key = `${entityType}:${entityId}`;
+    delete this.entitySnapshots[key];
+    this._persistSnapshots();
   }
 
   _handleConflict(operation, serverResult) {
     operation.status = OPERATION_STATUSES.CONFLICT;
     operation.conflictInfo = {
       conflictType: serverResult.conflictType,
+      conflictReason: serverResult.conflictReason,
+      serverVersion: serverResult.serverVersionData || serverResult.serverVersion,
+      baseVersion: serverResult.baseVersion,
       serverVersion: serverResult.serverVersion,
+      conflictFields: serverResult.conflictFields || null,
+      modifiedFields: serverResult.modifiedFields || null,
       detectedAt: new Date().toISOString(),
     };
 
@@ -298,14 +393,18 @@ export class SyncManager {
         entityType: operation.entityType,
         entityId: operation.entityId,
         conflictType: serverResult.conflictType,
+        conflictReason: serverResult.conflictReason,
         localVersion: {
           data: operation.data,
           snapshot: operation.beforeSnapshot,
+          baseVersion: operation.baseVersion,
           updatedAt: operation.createdAt,
           clientId: this.clientId,
           timelineEntry: operation.timelineEntry || null,
         },
-        serverVersion: serverResult.serverVersion,
+        serverVersion: serverResult.serverVersionData || serverResult.serverVersion || null,
+        conflictFields: serverResult.conflictFields || [],
+        modifiedFields: serverResult.modifiedFields || [],
         status: 'pending',
         detectedAt: new Date().toISOString(),
         resolvedAt: null,
@@ -313,6 +412,14 @@ export class SyncManager {
       };
       this.conflicts.push(conflict);
       this._persistConflicts();
+
+      this._addClientAuditEntry({
+        action: '检测到数据冲突',
+        operationId: operation.id,
+        conflictId: conflict.id,
+        conflictType: serverResult.conflictType,
+        conflictReason: serverResult.conflictReason,
+      });
     }
 
     this._persistQueue();
@@ -334,29 +441,56 @@ export class SyncManager {
       operation.conflictInfo = null;
       operation.retryCount = 0;
       operation.forced = true;
+      if (conflict.serverVersion && conflict.serverVersion._version) {
+        operation.data._version = conflict.serverVersion._version;
+      }
     } else if (resolution === 'keep_server') {
       operation.status = OPERATION_STATUSES.SYNCED;
       operation.syncedAt = new Date().toISOString();
-      operation.serverResponse = { discarded: true };
+      operation.serverResponse = { discarded: true, resolution: 'keep_server' };
       conflict.serverApplied = true;
+      if (conflict.serverVersion) {
+        this.takeSnapshot(operation.entityType, operation.entityId, conflict.serverVersion);
+      }
     } else if (resolution === 'merge' && customMergeData) {
       operation.data = JSON.parse(JSON.stringify(customMergeData));
       operation.status = OPERATION_STATUSES.PENDING;
       operation.conflictInfo = null;
       operation.retryCount = 0;
       operation.merged = true;
+      operation.forced = true;
       conflict.mergeResult = customMergeData;
+      if (conflict.serverVersion && conflict.serverVersion._version) {
+        operation.data._version = conflict.serverVersion._version;
+      }
     }
 
     this._persistConflicts();
     this._persistQueue();
     this._notifyListeners();
 
+    this._addClientAuditEntry({
+      action: '冲突已解决',
+      conflictId,
+      operationId: operation.id,
+      resolution,
+      detail: `冲突解决方式: ${this._getResolutionLabel(resolution)}`,
+    });
+
     if (resolution !== 'keep_server') {
       this.startSync();
     }
 
     return true;
+  }
+
+  _getResolutionLabel(resolution) {
+    const labels = {
+      'keep_local': '保留本地修改',
+      'keep_server': '使用服务端版本',
+      'merge': '手动合并数据',
+    };
+    return labels[resolution] || resolution;
   }
 
   retryOperation(operationId) {
@@ -368,6 +502,11 @@ export class SyncManager {
     operation.lastError = null;
     this._persistQueue();
     this._notifyListeners();
+
+    this._addClientAuditEntry({
+      action: '手动重试操作',
+      operationId,
+    });
 
     if (this.syncStatus !== SYNC_STATUSES.OFFLINE) {
       this.startSync();
@@ -388,6 +527,9 @@ export class SyncManager {
     if (changed) {
       this._persistQueue();
       this._notifyListeners();
+      this._addClientAuditEntry({
+        action: '手动重试所有失败操作',
+      });
       if (this.syncStatus !== SYNC_STATUSES.OFFLINE) {
         this.startSync();
       }
@@ -401,6 +543,10 @@ export class SyncManager {
     if (this.operationQueue.length !== beforeCount) {
       this._persistQueue();
       this._notifyListeners();
+      this._addClientAuditEntry({
+        action: '清除已同步操作记录',
+        clearedCount: beforeCount - this.operationQueue.length,
+      });
     }
   }
 
@@ -476,7 +622,7 @@ export class SyncManager {
     ]);
 
     for (const key of allKeys) {
-      if (key === 'timeline' || key === 'id' || key === 'createdAt' || key === 'updatedAt') continue;
+      if (key.startsWith('_') || key === 'timeline' || key === 'id' || key === 'createdAt' || key === 'updatedAt') continue;
 
       const localVal = localData?.[key];
       const serverVal = serverData?.[key];
@@ -492,6 +638,72 @@ export class SyncManager {
       }
     }
     return diffs;
+  }
+
+  getServerAuditLog(filters) {
+    return serverMock.getAuditLog(filters);
+  }
+
+  getFullAuditTrail(entityType, entityId) {
+    const serverLog = serverMock.getAuditTrailForEntity(entityType, entityId);
+    const clientLog = this.clientAuditLog.filter(e =>
+      e.entityType === entityType && e.entityId === entityId
+    );
+
+    const combined = [
+      ...serverLog.map(e => ({ ...e, source: 'server' })),
+      ...clientLog.map(e => ({ ...e, source: 'client', serverOperationId: null })),
+    ];
+
+    combined.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+    return combined;
+  }
+
+  getClientAuditLog() {
+    return [...this.clientAuditLog].reverse();
+  }
+
+  getSyncStatistics() {
+    return serverMock.getStatistics();
+  }
+
+  simulateServerConflict(entityType, entityId, modifierName) {
+    const result = serverMock.simulateConcurrentModify(entityType, entityId, modifierName);
+    if (result) {
+      this._addClientAuditEntry({
+        action: '模拟服务端并发修改',
+        entityType,
+        entityId,
+        modifierName,
+      });
+    }
+    return result;
+  }
+
+  simulateServerDelete(entityType, entityId) {
+    const result = serverMock.simulateEntityDeleted(entityType, entityId);
+    if (result) {
+      this._addClientAuditEntry({
+        action: '模拟服务端删除实体',
+        entityType,
+        entityId,
+      });
+    }
+    return result;
+  }
+
+  clearAllSyncData() {
+    this.operationQueue = [];
+    this.conflicts = [];
+    this.entitySnapshots = {};
+    this.clientAuditLog = [];
+    this._persistQueue();
+    this._persistConflicts();
+    this._persistSnapshots();
+    this._persistClientAudit();
+    this._notifyListeners();
+    serverMock.clearAll();
   }
 }
 

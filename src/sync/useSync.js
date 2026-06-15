@@ -100,6 +100,8 @@ export function useSync() {
     syncManager.takeSnapshot(entityType, entityId, data), []);
   const getSnapshot = useCallback((entityType, entityId) =>
     syncManager.getSnapshot(entityType, entityId), []);
+  const getEntityVersion = useCallback((entityType, entityId) =>
+    syncManager.getEntityVersion(entityType, entityId), []);
   const isEntityDirty = useCallback((entityType, entityId) =>
     syncManager.isEntityDirty(entityType, entityId), []);
   const hasConflict = useCallback((entityType, entityId) =>
@@ -107,6 +109,17 @@ export function useSync() {
   const getOpDescription = useCallback((op) => syncManager.getOperationDescription(op), []);
   const getConflictTypeLabel = useCallback((type) => syncManager.getConflictTypeLabel(type), []);
   const computeFieldDiffs = useCallback((local, server) => syncManager.computeFieldDiffs(local, server), []);
+
+  const getServerAuditLog = useCallback((filters) => syncManager.getServerAuditLog(filters), []);
+  const getFullAuditTrail = useCallback((entityType, entityId) =>
+    syncManager.getFullAuditTrail(entityType, entityId), []);
+  const getClientAuditLog = useCallback(() => syncManager.getClientAuditLog(), []);
+  const getSyncStatistics = useCallback(() => syncManager.getSyncStatistics(), []);
+  const simulateServerConflict = useCallback((entityType, entityId, modifierName) =>
+    syncManager.simulateServerConflict(entityType, entityId, modifierName), []);
+  const simulateServerDelete = useCallback((entityType, entityId) =>
+    syncManager.simulateServerDelete(entityType, entityId), []);
+  const clearAllSyncData = useCallback(() => syncManager.clearAllSyncData(), []);
 
   return {
     syncState,
@@ -125,10 +138,18 @@ export function useSync() {
     clearSynced,
     takeSnapshot,
     getSnapshot,
+    getEntityVersion,
     isEntityDirty,
     hasConflict,
     getOpDescription,
     getConflictTypeLabel,
     computeFieldDiffs,
+    getServerAuditLog,
+    getFullAuditTrail,
+    getClientAuditLog,
+    getSyncStatistics,
+    simulateServerConflict,
+    simulateServerDelete,
+    clearAllSyncData,
   };
 }

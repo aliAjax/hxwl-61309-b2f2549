@@ -6,6 +6,7 @@ import {
   SyncStatusBar,
   ConflictResolver,
   OperationQueueViewer,
+  AuditLogViewer,
 } from './sync';
 
 const appConfig = {
@@ -571,6 +572,7 @@ function App() {
   const sync = useSync();
   const [showConflictResolver, setShowConflictResolver] = useState(false);
   const [showOpQueue, setShowOpQueue] = useState(false);
+  const [showAuditLog, setShowAuditLog] = useState(false);
 
   const [records, setRecords] = useState(loadRecords);
   const [form, setForm] = useState(appConfig.defaultValues);
@@ -1999,6 +2001,7 @@ function App() {
         getOpDescription={sync.getOpDescription}
         onOpenConflicts={() => setShowConflictResolver(true)}
         onOpenOperations={() => setShowOpQueue(true)}
+        onOpenAuditLog={() => setShowAuditLog(true)}
       />
 
       <div className="tabs">
@@ -3781,6 +3784,19 @@ function App() {
           clearSynced={sync.clearSynced}
           onClose={() => setShowOpQueue(false)}
           onOpenConflicts={() => { setShowOpQueue(false); setShowConflictResolver(true); }}
+        />
+      )}
+
+      {showAuditLog && (
+        <AuditLogViewer
+          serverAuditLog={sync.getServerAuditLog()}
+          clientAuditLog={sync.getClientAuditLog()}
+          syncStatistics={sync.getSyncStatistics()}
+          getFullAuditTrail={sync.getFullAuditTrail}
+          simulateServerConflict={sync.simulateServerConflict}
+          simulateServerDelete={sync.simulateServerDelete}
+          clearAllSyncData={sync.clearAllSyncData}
+          onClose={() => setShowAuditLog(false)}
         />
       )}
     </main>
