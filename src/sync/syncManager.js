@@ -1,547 +1,498 @@
-import { OperationLog, OPERATION_STATUS, OPERATION_TYPES, ENTITY_TYPES } from './operationLog';
-import { ConflictDetector, ConflictRepo, CONFLICT_STATUS } from './conflictEngine';
-import { SyncStateRepo, RecordRepo, DeviationRepo, TemplateRepo, CenterRepo, VersionRepo, AuditRepo, EntityMetadataRepo } from './repositories';
-import { generateId } from './repositories';
+import { OPERATION_TYPES, OPERATION_STATUSES, CONFLICT_TYPES, SYNC_STATUSES, STORAGE_KEYS } from './types';
 
-const SERVER_STORAGE_PREFIX = 'hxwl_server_mock_';
+function uid() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
 
-export const SYNC_STATUS = {
-  IDLE: 'idle',
-  SYNCING: 'syncing',
-  CONFLICT: 'conflict',
-  ERROR: 'error',
-  OFFLINE: 'offline',
-};
-
-export class MockServerAPI {
-  constructor() {
-    this.entities = {
-      [ENTITY_TYPES.RECORD]: this.loadFromStorage(ENTITY_TYPES.RECORD),
-      [ENTITY_TYPES.DEVIATION]: this.loadFromStorage(ENTITY_TYPES.DEVIATION),
-      [ENTITY_TYPES.TEMPLATE]: this.loadFromStorage(ENTITY_TYPES.TEMPLATE),
-      [ENTITY_TYPES.CENTER]: this.loadFromStorage(ENTITY_TYPES.CENTER),
-      [ENTITY_TYPES.VERSION]: this.loadFromStorage(ENTITY_TYPES.VERSION),
-      [ENTITY_TYPES.AUDIT]: this.loadFromStorage(ENTITY_TYPES.AUDIT),
-    };
-    this.versions = this.loadFromStorage('versions_meta') || {};
+function getClientId() {
+  let clientId = localStorage.getItem(STORAGE_KEYS.CLIENT_ID);
+  if (!clientId) {
+    clientId = 'client-' + uid();
+    localStorage.setItem(STORAGE_KEYS.CLIENT_ID, clientId);
   }
+  return clientId;
+}
 
-  loadFromStorage(key) {
-    try {
-      const raw = localStorage.getItem(SERVER_STORAGE_PREFIX + key);
-      return raw ? JSON.parse(raw) : {};
-    } catch {
-      return {};
+function loadFromStorage(key, defaultValue) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      return JSON.parse(raw);
     }
+  } catch (e) {
+    console.error('Failed to load from storage:', key, e);
   }
+  return defaultValue;
+}
 
-  saveToStorage(key, data) {
-    try {
-      localStorage.setItem(SERVER_STORAGE_PREFIX + key, JSON.stringify(data));
-    } catch (e) {
-      console.warn('Mock server storage full', e);
-    }
-  }
-
-  persist() {
-    for (const [type, data] of Object.entries(this.entities)) {
-      this.saveToStorage(type, data);
-    }
-    this.saveToStorage('versions_meta', this.versions);
-  }
-
-  getEntityVersion(entityType, entityId) {
-    return this.versions[`${entityType}:${entityId}`] || 0;
-  }
-
-  setEntityVersion(entityType, entityId, version) {
-    this.versions[`${entityType}:${entityId}`] = version;
-  }
-
-  async fetchEntity(entityType, entityId) {
-    await this.simulateNetworkDelay();
-    const entity = this.entities[entityType]?.[entityId];
-    if (!entity) return { success: true, data: null, version: 0 };
-    return {
-      success: true,
-      data: { ...entity },
-      version: this.getEntityVersion(entityType, entityId),
-    };
-  }
-
-  async fetchAll(entityType, sinceTimestamp = null) {
-    await this.simulateNetworkDelay();
-    const all = Object.values(this.entities[entityType] || {});
-    if (sinceTimestamp) {
-      const filtered = all.filter(e => new Date(e.updatedAt || e.createdAt) > new Date(sinceTimestamp));
-      return { success: true, data: filtered, total: filtered.length };
-    }
-    return { success: true, data: all, total: all.length };
-  }
-
-  async applyOperation(operation) {
-    await this.simulateNetworkDelay();
-
-    const { entityType, entityId, operationType, data, baseVersion } = operation;
-    const currentVersion = this.getEntityVersion(entityType, entityId);
-    const existing = this.entities[entityType]?.[entityId];
-
-    if (operationType === OPERATION_TYPES.CREATE) {
-      if (existing) {
-        return {
-          success: false,
-          error: 'ENTITY_EXISTS',
-          conflict: true,
-          existingEntity: { ...existing },
-          existingVersion: currentVersion,
-        };
-      }
-      const newEntity = {
-        ...data,
-        id: entityId,
-        updatedAt: new Date().toISOString(),
-        createdAt: data.createdAt || new Date().toISOString(),
-        version: 1,
-      };
-      if (!this.entities[entityType]) this.entities[entityType] = {};
-      this.entities[entityType][entityId] = newEntity;
-      this.setEntityVersion(entityType, entityId, 1);
-      this.persist();
-      return { success: true, data: newEntity, version: 1 };
-    }
-
-    if (operationType === OPERATION_TYPES.UPDATE) {
-      if (!existing) {
-        return {
-          success: false,
-          error: 'ENTITY_NOT_FOUND',
-          conflict: true,
-        };
-      }
-      if (baseVersion && baseVersion < currentVersion) {
-        return {
-          success: false,
-          error: 'VERSION_MISMATCH',
-          conflict: true,
-          existingEntity: { ...existing },
-          existingVersion: currentVersion,
-          baseVersion,
-        };
-      }
-      const nextVersion = currentVersion + 1;
-      const updated = {
-        ...existing,
-        ...data,
-        id: entityId,
-        updatedAt: new Date().toISOString(),
-        version: nextVersion,
-      };
-      this.entities[entityType][entityId] = updated;
-      this.setEntityVersion(entityType, entityId, nextVersion);
-      this.persist();
-      return { success: true, data: updated, version: nextVersion };
-    }
-
-    if (operationType === OPERATION_TYPES.DELETE) {
-      if (!existing) {
-        return { success: true, data: null, version: 0 };
-      }
-      if (baseVersion && baseVersion < currentVersion) {
-        return {
-          success: false,
-          error: 'VERSION_MISMATCH_DELETE',
-          conflict: true,
-          existingEntity: { ...existing },
-          existingVersion: currentVersion,
-        };
-      }
-      delete this.entities[entityType][entityId];
-      delete this.versions[`${entityType}:${entityId}`];
-      this.persist();
-      return { success: true, data: null, version: 0 };
-    }
-
-    return { success: false, error: 'UNKNOWN_OPERATION' };
-  }
-
-  async bulkFetchUpdates(entityTypes, sinceTimestamp) {
-    await this.simulateNetworkDelay(200);
-    const result = {};
-    for (const type of entityTypes) {
-      const res = await this.fetchAll(type, sinceTimestamp);
-      result[type] = res.data || [];
-    }
-    return { success: true, data: result, timestamp: new Date().toISOString() };
-  }
-
-  simulateNetworkDelay(baseDelay = 80) {
-    const jitter = Math.random() * 100;
-    const shouldFail = Math.random() < 0.02;
-    return new Promise((resolve, reject) => {
-      setTimeout(() => {
-        if (shouldFail && !window.__SYNC_ALWAYS_SUCCEED__) {
-          reject(new Error('Network error (simulated)'));
-        } else {
-          resolve();
-        }
-      }, baseDelay + jitter);
-    });
-  }
-
-  reset() {
-    for (const key of Object.keys(this.entities)) {
-      this.entities[key] = {};
-    }
-    this.versions = {};
-    this.persist();
-  }
-
-  seedFromLocal(records, deviations, templates, centers, versions) {
-    if (records) {
-      for (const r of records) {
-        if (!this.entities[ENTITY_TYPES.RECORD][r.id]) {
-          this.entities[ENTITY_TYPES.RECORD][r.id] = { ...r, version: 1 };
-          this.setEntityVersion(ENTITY_TYPES.RECORD, r.id, 1);
-        }
-      }
-    }
-    if (deviations) {
-      for (const d of deviations) {
-        if (!this.entities[ENTITY_TYPES.DEVIATION][d.id]) {
-          this.entities[ENTITY_TYPES.DEVIATION][d.id] = { ...d, version: 1 };
-          this.setEntityVersion(ENTITY_TYPES.DEVIATION, d.id, 1);
-        }
-      }
-    }
-    if (templates) {
-      for (const t of templates) {
-        if (!this.entities[ENTITY_TYPES.TEMPLATE][t.id]) {
-          this.entities[ENTITY_TYPES.TEMPLATE][t.id] = { ...t, version: 1 };
-          this.setEntityVersion(ENTITY_TYPES.TEMPLATE, t.id, 1);
-        }
-      }
-    }
-    if (centers) {
-      for (const c of centers) {
-        if (!this.entities[ENTITY_TYPES.CENTER][c.id]) {
-          this.entities[ENTITY_TYPES.CENTER][c.id] = { ...c, version: 1 };
-          this.setEntityVersion(ENTITY_TYPES.CENTER, c.id, 1);
-        }
-      }
-    }
-    if (versions) {
-      for (const v of versions) {
-        if (!this.entities[ENTITY_TYPES.VERSION][v.id]) {
-          this.entities[ENTITY_TYPES.VERSION][v.id] = { ...v, version: 1 };
-          this.setEntityVersion(ENTITY_TYPES.VERSION, v.id, 1);
-        }
-      }
-    }
-    this.persist();
+function saveToStorage(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch (e) {
+    console.error('Failed to save to storage:', key, e);
+    return false;
   }
 }
 
-export const serverAPI = new MockServerAPI();
-
 export class SyncManager {
   constructor() {
-    this.status = SYNC_STATUS.IDLE;
-    this.isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
-    this.lastSyncAt = null;
-    this.listeners = new Map();
-    this.retryTimer = null;
+    this.listeners = new Set();
+    this.operationQueue = loadFromStorage(STORAGE_KEYS.OPERATION_QUEUE, []);
+    this.conflicts = loadFromStorage(STORAGE_KEYS.CONFLICTS, []);
+    this.entitySnapshots = loadFromStorage(STORAGE_KEYS.ENTITY_SNAPSHOTS, {});
+    this.syncStatus = typeof navigator !== 'undefined' && navigator.onLine ? SYNC_STATUSES.ONLINE : SYNC_STATUSES.OFFLINE;
+    this.lastSyncTime = loadFromStorage(STORAGE_KEYS.LAST_SYNC_TIME, null);
+    this.clientId = getClientId();
     this.syncing = false;
-    this.setupNetworkListeners();
+    this.retryTimer = null;
+    this._setupNetworkListeners();
   }
 
-  setupNetworkListeners() {
+  _setupNetworkListeners() {
     if (typeof window === 'undefined') return;
     window.addEventListener('online', () => {
-      this.isOnline = true;
-      this.emit('online', { timestamp: new Date().toISOString() });
-      this.scheduleSync(1000);
+      this._updateSyncStatus(SYNC_STATUSES.ONLINE);
+      this.startSync();
     });
     window.addEventListener('offline', () => {
-      this.isOnline = false;
-      this.status = SYNC_STATUS.OFFLINE;
-      this.emit('offline', { timestamp: new Date().toISOString() });
+      this._updateSyncStatus(SYNC_STATUSES.OFFLINE);
+      this._clearRetryTimer();
     });
   }
 
-  on(event, callback) {
-    if (!this.listeners.has(event)) {
-      this.listeners.set(event, new Set());
-    }
-    this.listeners.get(event).add(callback);
-    return () => this.off(event, callback);
-  }
-
-  off(event, callback) {
-    this.listeners.get(event)?.delete(callback);
-  }
-
-  emit(event, data) {
-    this.listeners.get(event)?.forEach(cb => {
-      try { cb(data); } catch (e) { console.error('Sync listener error', e); }
-    });
-  }
-
-  scheduleSync(delay = 2000) {
+  _clearRetryTimer() {
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
+      this.retryTimer = null;
     }
-    this.retryTimer = setTimeout(() => {
-      this.syncAll().catch(e => console.error('Scheduled sync failed', e));
-    }, delay);
   }
 
-  async syncAll(options = {}) {
-    if (!this.isOnline) {
-      this.status = SYNC_STATUS.OFFLINE;
-      return { success: false, error: 'offline' };
+  _updateSyncStatus(status) {
+    this.syncStatus = status;
+    this._notifyListeners();
+  }
+
+  _notifyListeners() {
+    const state = this.getState();
+    this.listeners.forEach(fn => {
+      try { fn(state); } catch (e) { console.error(e); }
+    });
+  }
+
+  _persistQueue() {
+    saveToStorage(STORAGE_KEYS.OPERATION_QUEUE, this.operationQueue);
+  }
+
+  _persistConflicts() {
+    saveToStorage(STORAGE_KEYS.CONFLICTS, this.conflicts);
+  }
+
+  _persistSnapshots() {
+    saveToStorage(STORAGE_KEYS.ENTITY_SNAPSHOTS, this.entitySnapshots);
+  }
+
+  _persistLastSync() {
+    saveToStorage(STORAGE_KEYS.LAST_SYNC_TIME, this.lastSyncTime);
+  }
+
+  subscribe(listener) {
+    this.listeners.add(listener);
+    listener(this.getState());
+    return () => this.listeners.delete(listener);
+  }
+
+  getState() {
+    return {
+      syncStatus: this.syncStatus,
+      pendingCount: this.operationQueue.filter(op => op.status === OPERATION_STATUSES.PENDING).length,
+      failedCount: this.operationQueue.filter(op => op.status === OPERATION_STATUSES.FAILED).length,
+      conflictCount: this.conflicts.length,
+      lastSyncTime: this.lastSyncTime,
+      operationQueue: [...this.operationQueue],
+      conflicts: [...this.conflicts],
+      clientId: this.clientId,
+    };
+  }
+
+  takeSnapshot(entityType, entityId, entityData) {
+    const key = `${entityType}:${entityId}`;
+    this.entitySnapshots[key] = {
+      entityType,
+      entityId,
+      data: JSON.parse(JSON.stringify(entityData)),
+      timestamp: new Date().toISOString(),
+      clientId: this.clientId,
+    };
+    this._persistSnapshots();
+  }
+
+  getSnapshot(entityType, entityId) {
+    const key = `${entityType}:${entityId}`;
+    return this.entitySnapshots[key] || null;
+  }
+
+  enqueueOperation(type, entityType, entityId, data, options = {}) {
+    const operation = {
+      id: uid(),
+      type,
+      entityType,
+      entityId,
+      data: JSON.parse(JSON.stringify(data)),
+      beforeSnapshot: options.beforeSnapshot || this.getSnapshot(entityType, entityId)?.data || null,
+      status: OPERATION_STATUSES.PENDING,
+      createdAt: new Date().toISOString(),
+      clientId: this.clientId,
+      retryCount: 0,
+      lastError: null,
+      conflictInfo: null,
+      order: this.operationQueue.length,
+    };
+
+    if (options.timelineEntry) {
+      operation.timelineEntry = options.timelineEntry;
     }
-    if (this.syncing && !options.force) {
-      return { success: false, error: 'already_syncing' };
+    if (options.auditEntry) {
+      operation.auditEntry = options.auditEntry;
+    }
+
+    this.operationQueue.push(operation);
+    this._persistQueue();
+    this._notifyListeners();
+
+    if (this.syncStatus === SYNC_STATUSES.ONLINE) {
+      this.startSync();
+    }
+
+    return operation;
+  }
+
+  async startSync() {
+    if (this.syncing) return;
+    if (this.syncStatus === SYNC_STATUSES.OFFLINE) return;
+
+    const pendingOps = this.operationQueue.filter(
+      op => op.status === OPERATION_STATUSES.PENDING || op.status === OPERATION_STATUSES.FAILED
+    );
+    if (pendingOps.length === 0) {
+      this.lastSyncTime = new Date().toISOString();
+      this._persistLastSync();
+      this._notifyListeners();
+      return;
     }
 
     this.syncing = true;
-    this.status = SYNC_STATUS.SYNCING;
-    this.emit('syncStart', {});
+    this._updateSyncStatus(SYNC_STATUSES.SYNCING);
 
-    let syncedCount = 0;
-    let conflictCount = 0;
-    let failedCount = 0;
-    const errors = [];
+    pendingOps.sort((a, b) => a.order - b.order);
+
+    for (const op of pendingOps) {
+      await this._syncOneOperation(op);
+    }
+
+    this.syncing = false;
+    const hasFailed = this.operationQueue.some(op => op.status === OPERATION_STATUSES.FAILED);
+    const hasConflicts = this.conflicts.length > 0;
+
+    if (hasConflicts) {
+      this._updateSyncStatus(SYNC_STATUSES.ERROR);
+    } else if (hasFailed) {
+      this._updateSyncStatus(SYNC_STATUSES.ERROR);
+      this._scheduleRetry();
+    } else {
+      this._updateSyncStatus(SYNC_STATUSES.ONLINE);
+      this.lastSyncTime = new Date().toISOString();
+      this._persistLastSync();
+    }
+
+    this._notifyListeners();
+  }
+
+  _scheduleRetry() {
+    this._clearRetryTimer();
+    const failedOps = this.operationQueue.filter(op => op.status === OPERATION_STATUSES.FAILED);
+    if (failedOps.length === 0) return;
+
+    const minRetry = Math.min(...failedOps.map(op => op.retryCount));
+    const delay = Math.min(1000 * Math.pow(2, minRetry), 60000);
+
+    this.retryTimer = setTimeout(() => {
+      if (this.syncStatus !== SYNC_STATUSES.OFFLINE) {
+        this.startSync();
+      }
+    }, delay);
+  }
+
+  async _syncOneOperation(operation) {
+    operation.status = OPERATION_STATUSES.SYNCING;
+    this._persistQueue();
+    this._notifyListeners();
 
     try {
-      const pushResult = await this.pushOperations();
-      syncedCount += pushResult.synced;
-      conflictCount += pushResult.conflicts;
-      failedCount += pushResult.failed;
-      errors.push(...pushResult.errors);
+      const serverResult = await this._callServerAPI(operation);
 
-      const pullResult = await this.pullUpdates();
-      syncedCount += pullResult.updated;
-
-      this.lastSyncAt = new Date().toISOString();
-      await SyncStateRepo.set('lastSyncAt', this.lastSyncAt);
-
-      if (conflictCount > 0) {
-        this.status = SYNC_STATUS.CONFLICT;
-      } else if (failedCount > 0) {
-        this.status = SYNC_STATUS.ERROR;
-      } else {
-        this.status = SYNC_STATUS.IDLE;
+      if (serverResult && serverResult.conflict) {
+        this._handleConflict(operation, serverResult);
+        return;
       }
 
-      this.emit('syncComplete', {
-        success: true,
-        syncedCount,
-        conflictCount,
-        failedCount,
-        errors,
-        lastSyncAt: this.lastSyncAt,
-      });
+      operation.status = OPERATION_STATUSES.SYNCED;
+      operation.syncedAt = new Date().toISOString();
+      operation.serverResponse = serverResult || null;
 
-      return { success: true, syncedCount, conflictCount, failedCount, errors };
-
-    } catch (err) {
-      this.status = SYNC_STATUS.ERROR;
-      this.emit('syncError', { error: err, timestamp: new Date().toISOString() });
-      if (!options.noRetry) {
-        this.scheduleSync(5000);
+      if (serverResult && serverResult.entityVersion) {
+        this.takeSnapshot(operation.entityType, operation.entityId, serverResult.entityData);
       }
-      return { success: false, error: err.message, syncedCount, conflictCount, failedCount };
-    } finally {
-      this.syncing = false;
+
+      this._persistQueue();
+    } catch (error) {
+      operation.status = OPERATION_STATUSES.FAILED;
+      operation.retryCount = (operation.retryCount || 0) + 1;
+      operation.lastError = {
+        message: error.message,
+        timestamp: new Date().toISOString(),
+      };
+      this._persistQueue();
     }
   }
 
-  async pushOperations() {
-    const ops = await OperationLog.getPendingOperations(200);
-    let synced = 0;
-    let conflicts = 0;
-    let failed = 0;
-    const errors = [];
+  async _callServerAPI(operation) {
+    await new Promise(resolve => setTimeout(resolve, 100 + Math.random() * 200));
 
-    for (const op of ops) {
-      try {
-        await OperationLog.updateStatus(op.opId, OPERATION_STATUS.IN_PROGRESS);
-        const result = await serverAPI.applyOperation(op);
-
-        if (result.success) {
-          await OperationLog.markSynced(op.opId);
-          await this.updateEntityMetadata(op.entityType, op.entityId, result.version, result.data);
-          synced++;
-          this.emit('operationSynced', { op, result });
-        } else if (result.conflict) {
-          const localEntity = op.operationType === OPERATION_TYPES.UPDATE
-            ? { ...op.previousData, ...op.data }
-            : op.data;
-
-          const conflict = ConflictDetector.detectConflict({
-            localOperation: op,
-            remoteEntity: result.existingEntity,
-            localEntity,
-            serverVersion: result.existingVersion,
-            entityType: op.entityType,
-          });
-
-          if (conflict) {
-            await ConflictRepo.create(conflict);
-            await OperationLog.markConflict(op.opId);
-            conflicts++;
-            this.emit('conflictDetected', { conflict, op });
-          } else {
-            await OperationLog.markFailed(op.opId, result.error || 'Unknown conflict');
-            failed++;
-            errors.push({ opId: op.opId, error: result.error });
-          }
-        } else {
-          await OperationLog.markFailed(op.opId, result.error || 'Unknown error');
-          failed++;
-          errors.push({ opId: op.opId, error: result.error });
-        }
-      } catch (err) {
-        await OperationLog.markFailed(op.opId, err.message);
-        failed++;
-        errors.push({ opId: op.opId, error: err.message });
-      }
+    const shouldSimulateConflict = Math.random() < 0.05;
+    if (shouldSimulateConflict && operation.type === OPERATION_TYPES.UPDATE_RECORD) {
+      return {
+        conflict: true,
+        conflictType: CONFLICT_TYPES.CONCURRENT_MODIFY,
+        serverVersion: {
+          ...operation.data,
+          status: Math.random() > 0.5 ? '已完成' : '窗口内',
+          updatedAt: new Date(Date.now() - 3600000).toISOString(),
+          updatedBy: '另一位操作员',
+        },
+      };
     }
 
-    return { synced, conflicts, failed, errors };
-  }
-
-  async pullUpdates() {
-    const lastSync = (await SyncStateRepo.get('lastSyncAt'))?.value || null;
-    const entityTypes = [
-      ENTITY_TYPES.RECORD,
-      ENTITY_TYPES.DEVIATION,
-      ENTITY_TYPES.TEMPLATE,
-      ENTITY_TYPES.CENTER,
-      ENTITY_TYPES.VERSION,
-    ];
-
-    const result = await serverAPI.bulkFetchUpdates(entityTypes, lastSync);
-    let updated = 0;
-
-    const repoMap = {
-      [ENTITY_TYPES.RECORD]: RecordRepo,
-      [ENTITY_TYPES.DEVIATION]: DeviationRepo,
-      [ENTITY_TYPES.TEMPLATE]: TemplateRepo,
-      [ENTITY_TYPES.CENTER]: CenterRepo,
-      [ENTITY_TYPES.VERSION]: VersionRepo,
-    };
-
-    for (const [entityType, entities] of Object.entries(result.data || {})) {
-      const repo = repoMap[entityType];
-      if (!repo || !Array.isArray(entities)) continue;
-
-      for (const remoteEntity of entities) {
-        try {
-          const metadata = await EntityMetadataRepo.get(entityType, remoteEntity.id);
-          const localVersion = metadata?.serverVersion || 0;
-          const remoteVersion = remoteEntity.version || 0;
-
-          if (remoteVersion > localVersion) {
-            const pendingOps = await OperationLog.getOperationsByEntity(entityType, remoteEntity.id);
-            const hasPending = pendingOps.some(o =>
-              o.status === OPERATION_STATUS.PENDING ||
-              o.status === OPERATION_STATUS.IN_PROGRESS ||
-              o.status === OPERATION_STATUS.FAILED ||
-              o.status === OPERATION_STATUS.CONFLICT
-            );
-
-            if (hasPending) {
-              const lastOp = pendingOps.find(o =>
-                o.status === OPERATION_STATUS.PENDING ||
-                o.status === OPERATION_STATUS.CONFLICT
-              );
-              if (lastOp) {
-                const existing = await repo.getById(remoteEntity.id);
-                const localEntity = existing || (lastOp.data ? { ...lastOp.data, id: remoteEntity.id } : null);
-                const conflict = ConflictDetector.detectConflict({
-                  localOperation: lastOp,
-                  remoteEntity,
-                  localEntity,
-                  serverVersion: remoteVersion,
-                  entityType,
-                });
-                if (conflict) {
-                  await ConflictRepo.create(conflict);
-                  await OperationLog.markConflict(lastOp.opId);
-                  continue;
-                }
-              }
-            }
-
-            await repo.upsert(remoteEntity);
-            await EntityMetadataRepo.set(entityType, remoteEntity.id, {
-              serverVersion: remoteVersion,
-              lastSyncedAt: new Date().toISOString(),
-              lastSyncSource: 'pull',
-            });
-            updated++;
-            this.emit('entityPulled', { entityType, entity: remoteEntity });
-          }
-        } catch (err) {
-          console.error(`Failed to pull ${entityType} ${remoteEntity.id}`, err);
-        }
-      }
-    }
-
-    return { updated };
-  }
-
-  async updateEntityMetadata(entityType, entityId, serverVersion, entity) {
-    await EntityMetadataRepo.set(entityType, entityId, {
-      serverVersion: serverVersion || 1,
-      lastSyncedAt: new Date().toISOString(),
-      lastSyncSource: 'push',
-    });
-  }
-
-  async retryFailedOps() {
-    const failed = await OperationLog.getFailedOperations();
-    for (const op of failed) {
-      if ((op.retryCount || 0) < 5) {
-        await OperationLog.updateStatus(op.opId, OPERATION_STATUS.PENDING);
-      }
-    }
-    return this.syncAll({ force: true });
-  }
-
-  async getSyncStats() {
-    const opStats = await OperationLog.getStats();
-    const openConflicts = await ConflictRepo.getOpenCount();
-    const lastSync = (await SyncStateRepo.get('lastSyncAt'))?.value;
     return {
-      status: this.status,
-      isOnline: this.isOnline,
-      lastSyncAt: lastSync,
-      pendingOperations: opStats.pending,
-      failedOperations: opStats.failed,
-      conflictOperations: opStats.conflict,
-      openConflicts,
-      totalOperations: opStats.total,
+      success: true,
+      entityVersion: operation.id,
+      entityData: operation.data,
+      syncedAt: new Date().toISOString(),
     };
   }
 
-  goOffline() {
-    this.isOnline = false;
-    this.status = SYNC_STATUS.OFFLINE;
-    this.emit('offline', { timestamp: new Date().toISOString() });
+  _handleConflict(operation, serverResult) {
+    operation.status = OPERATION_STATUSES.CONFLICT;
+    operation.conflictInfo = {
+      conflictType: serverResult.conflictType,
+      serverVersion: serverResult.serverVersion,
+      detectedAt: new Date().toISOString(),
+    };
+
+    const existingConflict = this.conflicts.find(c => c.operationId === operation.id);
+    if (!existingConflict) {
+      const conflict = {
+        id: uid(),
+        operationId: operation.id,
+        type: operation.type,
+        entityType: operation.entityType,
+        entityId: operation.entityId,
+        conflictType: serverResult.conflictType,
+        localVersion: {
+          data: operation.data,
+          snapshot: operation.beforeSnapshot,
+          updatedAt: operation.createdAt,
+          clientId: this.clientId,
+          timelineEntry: operation.timelineEntry || null,
+        },
+        serverVersion: serverResult.serverVersion,
+        status: 'pending',
+        detectedAt: new Date().toISOString(),
+        resolvedAt: null,
+        resolution: null,
+      };
+      this.conflicts.push(conflict);
+      this._persistConflicts();
+    }
+
+    this._persistQueue();
   }
 
-  goOnline() {
-    this.isOnline = true;
-    this.emit('online', { timestamp: new Date().toISOString() });
-    this.scheduleSync(500);
+  resolveConflict(conflictId, resolution, customMergeData) {
+    const conflict = this.conflicts.find(c => c.id === conflictId);
+    if (!conflict) return false;
+
+    const operation = this.operationQueue.find(op => op.id === conflict.operationId);
+    if (!operation) return false;
+
+    conflict.status = 'resolved';
+    conflict.resolvedAt = new Date().toISOString();
+    conflict.resolution = resolution;
+
+    if (resolution === 'keep_local') {
+      operation.status = OPERATION_STATUSES.PENDING;
+      operation.conflictInfo = null;
+      operation.retryCount = 0;
+      operation.forced = true;
+    } else if (resolution === 'keep_server') {
+      operation.status = OPERATION_STATUSES.SYNCED;
+      operation.syncedAt = new Date().toISOString();
+      operation.serverResponse = { discarded: true };
+      conflict.serverApplied = true;
+    } else if (resolution === 'merge' && customMergeData) {
+      operation.data = JSON.parse(JSON.stringify(customMergeData));
+      operation.status = OPERATION_STATUSES.PENDING;
+      operation.conflictInfo = null;
+      operation.retryCount = 0;
+      operation.merged = true;
+      conflict.mergeResult = customMergeData;
+    }
+
+    this._persistConflicts();
+    this._persistQueue();
+    this._notifyListeners();
+
+    if (resolution !== 'keep_server') {
+      this.startSync();
+    }
+
+    return true;
+  }
+
+  retryOperation(operationId) {
+    const operation = this.operationQueue.find(op => op.id === operationId);
+    if (!operation) return false;
+
+    operation.status = OPERATION_STATUSES.PENDING;
+    operation.retryCount = 0;
+    operation.lastError = null;
+    this._persistQueue();
+    this._notifyListeners();
+
+    if (this.syncStatus !== SYNC_STATUSES.OFFLINE) {
+      this.startSync();
+    }
+    return true;
+  }
+
+  retryAllFailed() {
+    let changed = false;
+    this.operationQueue.forEach(op => {
+      if (op.status === OPERATION_STATUSES.FAILED) {
+        op.status = OPERATION_STATUSES.PENDING;
+        op.retryCount = 0;
+        op.lastError = null;
+        changed = true;
+      }
+    });
+    if (changed) {
+      this._persistQueue();
+      this._notifyListeners();
+      if (this.syncStatus !== SYNC_STATUSES.OFFLINE) {
+        this.startSync();
+      }
+    }
+    return changed;
+  }
+
+  clearSyncedOperations() {
+    const beforeCount = this.operationQueue.length;
+    this.operationQueue = this.operationQueue.filter(op => op.status !== OPERATION_STATUSES.SYNCED);
+    if (this.operationQueue.length !== beforeCount) {
+      this._persistQueue();
+      this._notifyListeners();
+    }
+  }
+
+  getOperationById(id) {
+    return this.operationQueue.find(op => op.id === id);
+  }
+
+  getConflictById(id) {
+    return this.conflicts.find(c => c.id === id);
+  }
+
+  getPendingOperationsForEntity(entityType, entityId) {
+    return this.operationQueue.filter(
+      op => op.entityType === entityType &&
+            op.entityId === entityId &&
+            (op.status === OPERATION_STATUSES.PENDING || op.status === OPERATION_STATUSES.SYNCING)
+    );
+  }
+
+  getConflictsForEntity(entityType, entityId) {
+    return this.conflicts.filter(
+      c => c.entityType === entityType && c.entityId === entityId && c.status === 'pending'
+    );
+  }
+
+  isEntityDirty(entityType, entityId) {
+    return this.getPendingOperationsForEntity(entityType, entityId).length > 0;
+  }
+
+  hasConflict(entityType, entityId) {
+    return this.getConflictsForEntity(entityType, entityId).length > 0;
+  }
+
+  getOperationDescription(op) {
+    const typeLabels = {
+      [OPERATION_TYPES.ADD_RECORD]: '新增访视记录',
+      [OPERATION_TYPES.UPDATE_RECORD]: '更新访视记录',
+      [OPERATION_TYPES.DELETE_RECORD]: '删除访视记录',
+      [OPERATION_TYPES.UPDATE_RECORD_STATUS]: '更新访视状态',
+      [OPERATION_TYPES.ADD_DEVIATION]: '新增偏差记录',
+      [OPERATION_TYPES.UPDATE_DEVIATION]: '更新偏差记录',
+      [OPERATION_TYPES.DELETE_DEVIATION]: '删除偏差记录',
+      [OPERATION_TYPES.UPDATE_DEVIATION_STATUS]: '更新偏差状态',
+      [OPERATION_TYPES.ADD_TEMPLATE]: '新增访视模板',
+      [OPERATION_TYPES.UPDATE_TEMPLATE]: '更新访视模板',
+      [OPERATION_TYPES.DELETE_TEMPLATE]: '删除访视模板',
+      [OPERATION_TYPES.ADD_CENTER]: '新增研究中心',
+      [OPERATION_TYPES.UPDATE_CENTER]: '更新研究中心',
+      [OPERATION_TYPES.DELETE_CENTER]: '删除研究中心',
+      [OPERATION_TYPES.PUBLISH_VERSION]: '发布方案版本',
+      [OPERATION_TYPES.EXECUTE_MIGRATION]: '执行版本迁移',
+      [OPERATION_TYPES.ROLLBACK_MIGRATION]: '回滚版本迁移',
+    };
+    return typeLabels[op.type] || op.type;
+  }
+
+  getConflictTypeLabel(type) {
+    const labels = {
+      [CONFLICT_TYPES.CONCURRENT_MODIFY]: '并发修改冲突',
+      [CONFLICT_TYPES.DELETE_THEN_EDIT]: '删除后编辑冲突',
+      [CONFLICT_TYPES.VERSION_CHANGED]: '方案版本已变更',
+      [CONFLICT_TYPES.RECORD_NOT_FOUND]: '记录不存在',
+      [CONFLICT_TYPES.PERMISSION_DENIED]: '权限不足',
+    };
+    return labels[type] || type;
+  }
+
+  computeFieldDiffs(localData, serverData) {
+    const diffs = [];
+    const allKeys = new Set([
+      ...Object.keys(localData || {}),
+      ...Object.keys(serverData || {}),
+    ]);
+
+    for (const key of allKeys) {
+      if (key === 'timeline' || key === 'id' || key === 'createdAt' || key === 'updatedAt') continue;
+
+      const localVal = localData?.[key];
+      const serverVal = serverData?.[key];
+      const localStr = JSON.stringify(localVal);
+      const serverStr = JSON.stringify(serverVal);
+
+      if (localStr !== serverStr) {
+        diffs.push({
+          field: key,
+          localValue: localVal,
+          serverValue: serverVal,
+        });
+      }
+    }
+    return diffs;
   }
 }
 
 export const syncManager = new SyncManager();
-
-export function useSyncManager() {
-  return syncManager;
-}

@@ -1,16 +1,11 @@
-import { useMemo, useState, useRef, useCallback } from 'react';
-import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Building2, BarChart3, Edit3, AlertCircle, SearchX, CheckSquare, UserCircle, Clock, Filter, ArrowRight, User, Download, FileArchive, XCircle, Loader2, Table, Archive, FileSpreadsheet, GitCompare, History, ArrowLeftRight, ShieldCheck, Undo2, RefreshCw, BadgeCheck, Ban, GitBranch, ChevronDown, ChevronUp, FileCheck2, ArrowRightLeft, ClipboardCheck, Wifi, WifiOff, Database, Server } from 'lucide-react';
+import { useMemo, useState, useRef, useCallback, useEffect } from 'react';
+import { ClipboardPlus, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, FileText, Eye, Save, LayoutTemplate, X, List, Building2, BarChart3, Edit3, AlertCircle, SearchX, CheckSquare, UserCircle, Clock, Filter, ArrowRight, User, Download, FileArchive, XCircle, Loader2, Table, Archive, FileSpreadsheet, GitCompare, History, ArrowLeftRight, ShieldCheck, Undo2, RefreshCw, BadgeCheck, Ban, GitBranch, ChevronDown, ChevronUp, FileCheck2, ArrowRightLeft, ClipboardCheck } from 'lucide-react';
 import './App.css';
-import './sync/sync.css';
 import {
+  useSync,
   SyncStatusBar,
-  SyncPanel,
-  ConflictPanel,
-  OperationLogPanel,
-  AuditLogPanel,
-  useSyncStatus,
-  useConflicts,
-  useAutoMigrateFromLocalStorage,
+  ConflictResolver,
+  OperationQueueViewer,
 } from './sync';
 
 const appConfig = {
@@ -573,14 +568,9 @@ function sleep(ms) {
 }
 
 function App() {
-  useAutoMigrateFromLocalStorage();
-  const syncStatus = useSyncStatus();
-  const { conflicts } = useConflicts();
-
-  const [showSyncPanel, setShowSyncPanel] = useState(false);
-  const [showConflictPanel, setShowConflictPanel] = useState(false);
-  const [showOpLogPanel, setShowOpLogPanel] = useState(false);
-  const [showAuditPanel, setShowAuditPanel] = useState(false);
+  const sync = useSync();
+  const [showConflictResolver, setShowConflictResolver] = useState(false);
+  const [showOpQueue, setShowOpQueue] = useState(false);
 
   const [records, setRecords] = useState(loadRecords);
   const [form, setForm] = useState(appConfig.defaultValues);
@@ -648,23 +638,35 @@ function App() {
     if (!devForm.title.trim()) { alert('请填写偏差标题'); return; }
     if (!devForm.subjectNo.trim()) { alert('请填写受试者编号'); return; }
     if (devForm.id) {
+      const original = deviations.find(d => d.id === devForm.id);
+      const timelineEntry = devForm.status !== original?.status
+        ? { status: `状态变更: ${original?.status}→${devForm.status}`, at: today, by: devForm.reportedBy || '操作员' }
+        : null;
       const next = deviations.map(d => d.id === devForm.id ? {
         ...d, ...devForm,
-        timeline: devForm.status !== d.status
-          ? [...(d.timeline || []), { status: `状态变更: ${d.status}→${devForm.status}`, at: today, by: devForm.reportedBy || '操作员' }]
+        timeline: timelineEntry
+          ? [...(d.timeline || []), timelineEntry]
           : d.timeline,
       } : d);
       persistDeviations(next);
+      const updated = next.find(d => d.id === devForm.id);
+      if (updated) {
+        sync.enqueueDeviationUpdate(devForm.id, updated, { timelineEntry, beforeSnapshot: original });
+        sync.takeSnapshot('deviation', devForm.id, updated);
+      }
     } else {
+      const timelineEntry = { status: '创建', at: today, by: devForm.reportedBy || '操作员', note: devForm.description };
       const newDev = {
         id: uid(),
         centerId: activeCenterId,
         ...devForm,
         reportedAt: today,
         closedAt: devForm.status === 'closed' ? today : null,
-        timeline: [{ status: '创建', at: today, by: devForm.reportedBy || '操作员', note: devForm.description }],
+        timeline: [timelineEntry],
       };
       persistDeviations([newDev, ...deviations]);
+      sync.takeSnapshot('deviation', newDev.id, newDev);
+      sync.enqueueDeviationAdd(newDev, { timelineEntry });
       setSelectedDev(newDev);
     }
     setDevForm({
@@ -692,7 +694,9 @@ function App() {
 
   function deleteDeviation(id) {
     if (!confirm('确认删除该偏差记录？')) return;
+    const original = deviations.find(d => d.id === id);
     persistDeviations(deviations.filter(d => d.id !== id));
+    sync.enqueueDeviationDelete(id, { beforeSnapshot: original });
     if (selectedDev?.id === id) setSelectedDev(null);
     if (devForm.id === id) setDevForm({
       id: '', subjectNo: '', visitName: '', group: '', severity: 'mild', type: '其他',
@@ -701,13 +705,20 @@ function App() {
   }
 
   function updateDeviationStatus(id, newStatus) {
+    const original = deviations.find(d => d.id === id);
+    const timelineEntry = { status: `状态变更: ${original?.status}→${newStatus}`, at: today, by: '操作员' };
     const next = deviations.map(d => d.id === id ? {
       ...d,
       status: newStatus,
       closedAt: newStatus === 'closed' ? today : d.closedAt,
-      timeline: [...(d.timeline || []), { status: `状态变更: ${d.status}→${newStatus}`, at: today, by: '操作员' }],
+      timeline: [...(d.timeline || []), timelineEntry],
     } : d);
     persistDeviations(next);
+    const updated = next.find(d => d.id === id);
+    if (updated) {
+      sync.enqueueDeviationStatusUpdate(id, newStatus, updated, { timelineEntry, beforeSnapshot: original });
+      sync.takeSnapshot('deviation', id, updated);
+    }
     if (selectedDev?.id === id) setSelectedDev(next.find(d => d.id === id));
   }
 
@@ -770,6 +781,11 @@ function App() {
     localStorage.setItem(appConfig.storage, JSON.stringify(next));
   }
 
+  const recordsWithSync = useCallback((next, operation) => {
+    persist(next);
+    return operation;
+  }, []);
+
   function persistTemplates(next) {
     setTemplates(next);
     saveTemplates(next);
@@ -777,15 +793,18 @@ function App() {
 
   function addRecord(event) {
     event.preventDefault();
+    const timelineEntry = { status: form.status || appConfig.primaryStatus, at: today, by: '录入' };
     const nextRecord = {
       id: uid(),
       ...form,
       centerId: activeCenterId,
       status: form.status || appConfig.primaryStatus,
       createdAt: new Date().toISOString(),
-      timeline: [{ status: form.status || appConfig.primaryStatus, at: today, by: '录入' }]
+      timeline: [timelineEntry]
     };
     persist([nextRecord, ...records]);
+    sync.takeSnapshot('record', nextRecord.id, nextRecord);
+    sync.enqueueRecordAdd(nextRecord, { timelineEntry });
     setForm(appConfig.defaultValues);
     setSelectedTemplateId('');
     setSelected(nextRecord);
@@ -829,30 +848,46 @@ function App() {
       };
     });
     persist([...newRecords, ...records]);
+    newRecords.forEach(rec => {
+      sync.takeSnapshot('record', rec.id, rec);
+      sync.enqueueRecordAdd(rec, { timelineEntry: rec.timeline?.[0] });
+    });
     setForm(appConfig.defaultValues);
     setSelectedTemplateId('');
     if (newRecords.length > 0) setSelected(newRecords[0]);
   }
 
   function updateStatus(id, status) {
+    const timelineEntry = { status, at: today, by: '操作员' };
+    const original = records.find(item => item.id === id);
     const next = records.map((item) => item.id === id ? {
       ...item,
       status,
-      timeline: [...(item.timeline || []), { status, at: today, by: '操作员' }]
+      timeline: [...(item.timeline || []), timelineEntry]
     } : item);
     persist(next);
+    const updated = next.find(item => item.id === id);
+    if (updated) {
+      sync.enqueueRecordStatusUpdate(id, status, updated, { timelineEntry, beforeSnapshot: original });
+      sync.takeSnapshot('record', id, updated);
+    }
     if (selected?.id === id) setSelected(next.find((item) => item.id === id));
   }
 
   function removeRecord(id) {
+    const original = records.find(item => item.id === id);
     const next = records.filter((item) => item.id !== id);
     persist(next);
+    sync.enqueueRecordDelete(id, { beforeSnapshot: original });
     if (selected?.id === id) setSelected(null);
   }
 
   function duplicateRecord(item) {
-    const copied = { ...item, id: uid(), status: appConfig.primaryStatus, timeline: [{ status: appConfig.primaryStatus, at: today, by: '复制' }] };
+    const timelineEntry = { status: appConfig.primaryStatus, at: today, by: '复制' };
+    const copied = { ...item, id: uid(), status: appConfig.primaryStatus, timeline: [timelineEntry] };
     persist([copied, ...records]);
+    sync.takeSnapshot('record', copied.id, copied);
+    sync.enqueueRecordAdd(copied, { timelineEntry });
     setSelected(copied);
   }
 
@@ -1933,10 +1968,6 @@ function App() {
           <p>{appConfig.subtitle}</p>
         </div>
         <div className="hero-right">
-            <SyncStatusBar
-              onOpenSyncPanel={() => setShowSyncPanel(true)}
-              onOpenConflictPanel={() => setShowConflictPanel(true)}
-            />
             <div className="center-selector">
               <Building2 size={16} />
             <select value={activeCenterId} onChange={(e) => switchCenter(e.target.value)}>
@@ -1959,6 +1990,16 @@ function App() {
           </article>
         ))}
       </section>
+
+      <SyncStatusBar
+        syncState={sync.syncState}
+        startSync={sync.startSync}
+        retryAllFailed={sync.retryAllFailed}
+        clearSynced={sync.clearSynced}
+        getOpDescription={sync.getOpDescription}
+        onOpenConflicts={() => setShowConflictResolver(true)}
+        onOpenOperations={() => setShowOpQueue(true)}
+      />
 
       <div className="tabs">
         <button
@@ -2004,21 +2045,6 @@ function App() {
         >
           <GitBranch size={16} />版本管理与迁移
           {centerVersions.length > 0 && <span className="tab-badge">{centerVersions.filter(v => v.isCurrent).length}</span>}
-        </button>
-        <div style={{ flex: 1 }} />
-        <button
-          type="button"
-          className="sync-tool-btn"
-          onClick={() => setShowOpLogPanel(true)}
-        >
-          <History size={14} />操作日志
-        </button>
-        <button
-          type="button"
-          className="sync-tool-btn"
-          onClick={() => setShowAuditPanel(true)}
-        >
-          <ShieldCheck size={14} />审计记录
         </button>
       </div>
 
@@ -2163,8 +2189,11 @@ function App() {
             </div>
 
             <div className="records">
-              {filteredRecords.map((item) => (
-                <article className={'record ' + (item.conflict ? 'conflict' : '')} key={item.id} onClick={() => setSelected(item)}>
+              {filteredRecords.map((item) => {
+                const isDirty = sync.isEntityDirty('record', item.id);
+                const hasConflictFlag = sync.hasConflict('record', item.id);
+                return (
+                <article className={'record ' + (hasConflictFlag ? 'conflict' : '')} key={item.id} onClick={() => setSelected(item)}>
                   <div className="record-head">
                     <div>
                       <h3>{`${item.subjectNo} ${item.visitName}`}</h3>
@@ -2173,7 +2202,8 @@ function App() {
                     <span className={'status ' + statusClass(item.status)}>{item.status}</span>
                   </div>
                   <p className="record-detail">{item.items}</p>
-                  {item.conflict && <div className="warning"><AlertTriangle size={15} />发现冲突</div>}
+                  {hasConflictFlag && <div className="warning" onClick={(e) => { e.stopPropagation(); setShowConflictResolver(true); }} style={{ cursor: 'pointer' }}><AlertTriangle size={15} />发现冲突，点击处理</div>}
+                  {isDirty && !hasConflictFlag && <div className="warning" style={{ background: '#dbeafe', color: '#1e40af', borderColor: '#93c5fd' }}><RefreshCw size={14} className="spin" />待同步中...</div>}
                   {(() => {
                     const recDev = deviations.find(d => d.sourceRecordId === item.id);
                     if (recDev) {
@@ -2195,7 +2225,7 @@ function App() {
                     <button className="ghost-danger" type="button" onClick={() => removeRecord(item.id)}><Trash2 size={14} /></button>
                   </div>
                 </article>
-              ))}
+                );})}
               {filteredRecords.length === 0 && (
                 <p className="empty" style={{ padding: 20, textAlign: 'center' }}>暂无记录，可在左侧录入或从访视方案模板批量生成。</p>
               )}
@@ -3732,24 +3762,26 @@ function App() {
         )}
       </section>
 
-      {!syncStatus.isOnline && (
-        <div className="offline-banner">
-          <WifiOff size={18} />
-          当前处于离线模式，所有操作已保存在本地，恢复网络后将自动同步
-        </div>
+      {showConflictResolver && (
+        <ConflictResolver
+          conflicts={sync.syncState.conflicts}
+          resolveConflict={sync.resolveConflict}
+          getConflictTypeLabel={sync.getConflictTypeLabel}
+          computeFieldDiffs={sync.computeFieldDiffs}
+          onClose={() => setShowConflictResolver(false)}
+        />
       )}
 
-      {showSyncPanel && (
-        <SyncPanel onClose={() => setShowSyncPanel(false)} />
-      )}
-      {showConflictPanel && (
-        <ConflictPanel onClose={() => setShowConflictPanel(false)} />
-      )}
-      {showOpLogPanel && (
-        <OperationLogPanel onClose={() => setShowOpLogPanel(false)} />
-      )}
-      {showAuditPanel && (
-        <AuditLogPanel onClose={() => setShowAuditPanel(false)} />
+      {showOpQueue && (
+        <OperationQueueViewer
+          operationQueue={sync.syncState.operationQueue}
+          getOpDescription={sync.getOpDescription}
+          retryOperation={sync.retryOperation}
+          retryAllFailed={sync.retryAllFailed}
+          clearSynced={sync.clearSynced}
+          onClose={() => setShowOpQueue(false)}
+          onOpenConflicts={() => { setShowOpQueue(false); setShowConflictResolver(true); }}
+        />
       )}
     </main>
   );
